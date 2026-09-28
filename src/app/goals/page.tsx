@@ -36,6 +36,8 @@ import {
   PiggyBankIcon,
   CircleDollarSignIcon,
   ArrowRightIcon,
+  LightbulbIcon,
+  ActivityIcon,
 } from 'lucide-react';
 
 interface PriceScenario {
@@ -167,6 +169,26 @@ interface DCAAnalysisResult {
     totalPnLPercent: number;
   };
   currency?: string;
+}
+
+const RECOMMENDATION_STYLES: Record<string, { card: string; badge: string }> = {
+  success: { card: 'bg-profit/5 border-profit/20', badge: 'bg-profit/10 text-profit border-profit/20' },
+  warning: { card: 'bg-amber-500/5 border-amber-500/20', badge: 'bg-amber-500/10 text-amber-600 border-amber-500/20' },
+  info: { card: 'bg-primary/5 border-primary/20', badge: 'bg-primary/10 text-primary border-primary/20' },
+  tip: { card: 'bg-muted/50 border-border', badge: 'bg-muted text-muted-foreground border-border' },
+};
+
+function formatAnalysisDate(value?: string | Date | null): string {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '—';
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function formatMonthKey(month: string): string {
+  const [year, monthNumber] = month.split('-').map(Number);
+  if (!year || !monthNumber) return month;
+  return new Date(year, monthNumber - 1, 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
 }
 
 export default function GoalsPage() {
@@ -1228,6 +1250,37 @@ export default function GoalsPage() {
               )}
             </div>
 
+            {/* Recommendations */}
+            {dcaAnalysis.recommendations && dcaAnalysis.recommendations.length > 0 && (
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm flex items-center gap-2">
+                    <LightbulbIcon className="size-4" />
+                    Insights & Recommendations
+                  </CardTitle>
+                  <CardDescription>
+                    Auto-generated from your DCA history, timing and consistency
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-2">
+                    {dcaAnalysis.recommendations.map((rec, index) => {
+                      const style = RECOMMENDATION_STYLES[rec.type] || RECOMMENDATION_STYLES.info;
+                      return (
+                        <div
+                          key={index}
+                          className={cn('flex items-start gap-3 p-3 rounded-lg border', style.card)}
+                        >
+                          <span className="text-lg leading-none shrink-0" aria-hidden="true">{rec.icon}</span>
+                          <p className="text-sm leading-relaxed">{rec.message}</p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
             {/* What-If & Distribution */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               {dcaAnalysis.whatIfScenarios && dcaAnalysis.whatIfScenarios.length > 0 && (
@@ -1297,6 +1350,193 @@ export default function GoalsPage() {
                 </Card>
               )}
             </div>
+
+            {/* Timing & Consistency details */}
+            {dcaAnalysis.timing && dcaAnalysis.consistency && (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <Card>
+                  <CardHeader className="pb-3">
+                    <CardTitle className="text-sm flex items-center gap-2">
+                      <ClockIcon className="size-4" />
+                      Purchase Timing
+                    </CardTitle>
+                    <CardDescription>Where your entry prices landed</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="p-3 rounded-lg bg-muted/50">
+                        <p className="text-xs text-muted-foreground">Avg Buy Price</p>
+                        <p className="text-sm font-semibold mt-0.5">
+                          {formatCurrency(dcaAnalysis.timing.avgPurchasePrice, selectedCurrency)}
+                        </p>
+                      </div>
+                      <div className="p-3 rounded-lg bg-muted/50">
+                        <p className="text-xs text-muted-foreground">Current Price</p>
+                        <p className="text-sm font-semibold mt-0.5">
+                          {formatCurrency(dcaAnalysis.timing.currentPrice, selectedCurrency)}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between text-sm py-2 border-y border-border/50">
+                      <span className="text-muted-foreground">Cost basis vs current</span>
+                      <span className={cn(
+                        'font-semibold',
+                        dcaAnalysis.timing.priceImprovement >= 0 ? 'text-profit' : 'text-loss'
+                      )}>
+                        {dcaAnalysis.timing.priceImprovement >= 0 ? '+' : ''}
+                        {dcaAnalysis.timing.priceImprovement.toFixed(1)}%
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="p-3 rounded-lg border border-profit/20 bg-profit/5">
+                        <p className="text-xs text-muted-foreground flex items-center gap-1">
+                          <TrendingDownIcon className="size-3 text-profit" />
+                          Best entry
+                        </p>
+                        <p className="text-sm font-semibold mt-0.5 text-profit">
+                          {formatCurrency(dcaAnalysis.timing.bestPurchasePrice, selectedCurrency)}
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          {formatAnalysisDate(dcaAnalysis.timing.bestPurchaseDate)}
+                        </p>
+                      </div>
+                      <div className="p-3 rounded-lg border border-loss/20 bg-loss/5">
+                        <p className="text-xs text-muted-foreground flex items-center gap-1">
+                          <TrendingUpIcon className="size-3 text-loss" />
+                          Worst entry
+                        </p>
+                        <p className="text-sm font-semibold mt-0.5 text-loss">
+                          {formatCurrency(dcaAnalysis.timing.worstPurchasePrice, selectedCurrency)}
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          {formatAnalysisDate(dcaAnalysis.timing.worstPurchaseDate)}
+                        </p>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader className="pb-3">
+                    <CardTitle className="text-sm flex items-center gap-2">
+                      <TargetIcon className="size-4" />
+                      Consistency Detail
+                    </CardTitle>
+                    <CardDescription>How regular your accumulation is</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="p-3 rounded-lg bg-muted/50">
+                        <p className="text-xs text-muted-foreground">Total Purchases</p>
+                        <p className="text-sm font-semibold mt-0.5">{dcaAnalysis.consistency.totalPurchases}</p>
+                      </div>
+                      <div className="p-3 rounded-lg bg-muted/50">
+                        <p className="text-xs text-muted-foreground">Avg Interval</p>
+                        <p className="text-sm font-semibold mt-0.5">
+                          {dcaAnalysis.consistency.avgDaysBetweenPurchases.toFixed(0)} days
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between text-sm py-2 border-y border-border/50">
+                      <span className="text-muted-foreground flex items-center gap-1.5">
+                        <ActivityIcon className="size-3.5" />
+                        Last 30 days
+                      </span>
+                      <span className={cn(
+                        'font-semibold',
+                        dcaAnalysis.consistency.recentActivity === 0 ? 'text-loss' : 'text-profit'
+                      )}>
+                        {dcaAnalysis.consistency.recentActivity} purchases
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-between text-sm py-2 border-b border-border/50">
+                      <span className="text-muted-foreground">Longest gap</span>
+                      <span className={cn(
+                        'font-semibold',
+                        dcaAnalysis.consistency.longestGap > 60 ? 'text-amber-600' : ''
+                      )}>
+                        {dcaAnalysis.consistency.longestGap} days
+                      </span>
+                    </div>
+                    {dcaAnalysis.consistency.longestGapStart && dcaAnalysis.consistency.longestGapEnd && (
+                      <p className="text-xs text-muted-foreground -mt-1">
+                        {formatAnalysisDate(dcaAnalysis.consistency.longestGapStart)}
+                        {' → '}
+                        {formatAnalysisDate(dcaAnalysis.consistency.longestGapEnd)}
+                      </p>
+                    )}
+
+                    <div className="flex items-center justify-between text-sm py-2 border-b border-border/50">
+                      <span className="text-muted-foreground flex items-center gap-1.5">
+                        <CalendarIcon className="size-3.5" />
+                        Missed months
+                      </span>
+                      <span className={cn(
+                        'font-semibold',
+                        dcaAnalysis.consistency.missedMonths > 3 ? 'text-amber-600' : 'text-profit'
+                      )}>
+                        {dcaAnalysis.consistency.missedMonths}
+                      </span>
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+            )}
+
+            {/* Monthly breakdown */}
+            {dcaAnalysis.monthlyBreakdown && dcaAnalysis.monthlyBreakdown.length > 0 && (
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm flex items-center gap-2">
+                    <CalendarIcon className="size-4" />
+                    Monthly Accumulation
+                  </CardTitle>
+                  <CardDescription>
+                    Every month in your range, including the ones you skipped
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                    {dcaAnalysis.monthlyBreakdown.map((month) => (
+                      <div
+                        key={month.month}
+                        className={cn(
+                          'p-3 rounded-lg border',
+                          month.missed
+                            ? 'border-dashed border-amber-500/40 bg-amber-500/5'
+                            : 'border-border bg-muted/30'
+                        )}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm font-medium">{formatMonthKey(month.month)}</span>
+                          {month.missed ? (
+                            <Badge variant="outline" className="text-amber-600 border-amber-500/40 text-xs">
+                              Missed
+                            </Badge>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">
+                              {month.transactions} {month.transactions === 1 ? 'buy' : 'buys'}
+                            </span>
+                          )}
+                        </div>
+                        {!month.missed && (
+                          <div className="mt-2 flex items-center justify-between text-xs">
+                            <span className="text-muted-foreground">{month.btcPurchased.toFixed(6)} ₿</span>
+                            <span className="text-muted-foreground">
+                              @ {formatCurrency(month.avgPrice, selectedCurrency)}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
           </div>
         )}
       </div>
