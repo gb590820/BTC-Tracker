@@ -52,6 +52,29 @@ Track your Bitcoin investments privately on your own PC. Import transactions fro
 - **Multi-user support** - First user becomes admin, create accounts for family
 - **Easy import** - Auto-detect CSV format from Kraken, Binance, Coinbase, Strike
 - **Simple backup** - Single SQLite file, easy to backup and restore
+- **On-chain tracking (opt-in, read-only)** - Import your history from an address or an xpub
+
+### On-chain tracking
+Optionally, BTC-Tracker can read your Bitcoin history from the chain instead of asking you to type
+it in. It is **read-only**: no private key is ever requested, stored or accepted, and nothing is
+ever signed or broadcast. You give it either a **receive address** (if your wallet gives you one
+per deposit) or an **extended public key** (better, because it also covers the change addresses that
+only show up once you spend).
+
+Unconfirmed transactions are counted immediately and marked as pending. If a transaction is
+replaced, it is flagged as such.
+
+**Where your addresses go.** This is the one part that is not automatic: the app has to ask
+somewhere what it knows about your addresses, and that somewhere is a URL you configure.
+
+| Endpoint | What it means |
+|---|---|
+| `https://mempool.space/api` (default) | Easiest, and **your addresses and balances become visible to that third party** |
+| Your own Electrs | Nothing leaves your machine. A commented `bitcoind` + `electrs` recipe is in `docker-compose.yml` |
+
+Settings → On-chain has a **Test** button that checks the endpoint and shows the block height it
+reports. The feature is off by default; turn it on only once you have decided which trade-off you
+want.
 
 ## Screenshots
 
@@ -179,9 +202,11 @@ Existing portfolio trackers either:
 - Don't support multiple users
 - Have terrible import systems
 - Cost money for basic features
-- Require xpub or zpub wallet address
+- Require an xpub to be handed over before you can use them
 
-This gives you complete control over your Bitcoin tracking data.
+This gives you complete control over your Bitcoin tracking data. On-chain tracking is optional and
+watch-only: it asks for an address or an xpub, never a private key, and it works against a backend
+you choose.
 
 ## Requirements
 

@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import AppLayout from '@/components/AppLayout';
 import AddTransactionModal from '@/components/AddTransactionModal';
+import TransactionOnchainMeta from '@/components/TransactionOnchainMeta';
 import { formatCurrency, formatPercentage } from '@/lib/theme';
 import { cn } from '@/lib/utils';
 
@@ -90,6 +91,11 @@ interface BitcoinTransaction {
   updated_at: string;
   transfer_type?: string;
   destination_address?: string;
+  source?: string;
+  txid?: string | null;
+  confirmations?: number | null;
+  is_replaced?: boolean;
+  block_height?: number | null;
   from_wallet?: { id: number; name: string; emoji: string | null; type: string } | null;
   to_wallet?: { id: number; name: string; emoji: string | null; type: string } | null;
   secondary_currency?: string;
@@ -1048,6 +1054,13 @@ export default function TransactionsPage() {
                                     : 'TRANSFER'
                                 : transaction.type}
                             </Badge>
+                            <TransactionOnchainMeta
+                              className="mt-1"
+                              source={transaction.source}
+                              txid={transaction.txid}
+                              confirmations={transaction.confirmations}
+                              isReplaced={transaction.is_replaced}
+                            />
                           </div>
                         )}
                         {columnVisibility.amount && (
@@ -1212,6 +1225,13 @@ export default function TransactionsPage() {
                                       : 'TRANSFER'
                                   : transaction.type}
                               </Badge>
+                              <TransactionOnchainMeta
+                                className="mb-1"
+                                source={transaction.source}
+                                txid={transaction.txid}
+                                confirmations={transaction.confirmations}
+                                isReplaced={transaction.is_replaced}
+                              />
                               <p className="text-sm text-muted-foreground">{new Date(transaction.transaction_date).toLocaleDateString()}</p>
                             </div>
                           </div>

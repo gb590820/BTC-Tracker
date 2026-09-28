@@ -11,7 +11,25 @@ module.exports = {
   ],
   transform: {
     '^.+\\.tsx?$': 'ts-jest',
+    // @scure/* and @noble/* ship ESM only. Jest runs this project in CJS mode,
+    // so those packages have to be downlevelled to CommonJS on the way in.
+    // The pattern is anchored on node_modules to avoid touching our own .js
+    // files (src/tests/setup.js, src/tests/jest.env.js).
+    '^.+/node_modules/(@scure|@noble)/.+\\.m?js$': [
+      'ts-jest',
+      {
+        tsconfig: {
+          allowJs: true,
+          module: 'commonjs',
+          target: 'es2020',
+          esModuleInterop: true,
+        },
+      },
+    ],
   },
+  // Everything in node_modules stays untransformed except the two ESM-only
+  // crypto libraries above.
+  transformIgnorePatterns: ['/node_modules/(?!@scure|@noble)'],
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/src/$1'
   },

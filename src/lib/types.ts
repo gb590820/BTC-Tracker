@@ -272,12 +272,35 @@ export interface NotificationSettings {
   pushNotifications: boolean;
 }
 
+/**
+ * On-chain watching.
+ *
+ * `enabled` is deliberately false by default. Turning it on sends the addresses
+ * the user watches to `esploraEndpoint`; with the default public endpoint that
+ * discloses the whole watched set to a third party, so it must be an explicit
+ * decision rather than a side effect of adding an address.
+ */
+export interface OnchainSettings {
+  enabled: boolean;
+  /** Base URL of an Esplora-compatible API, without a trailing slash. */
+  esploraEndpoint: string;
+  /** Minutes between automatic syncs. */
+  syncIntervalMinutes: number;
+  /** External + change indices derived from an xpub. */
+  gapLimit: number;
+  /** Per-request timeout in milliseconds. */
+  requestTimeoutMs: number;
+  /** Recompute the portfolio summary when a sync imports something new. */
+  recalculatePortfolio: boolean;
+}
+
 export interface AppSettings {
   id: number;
   currency: CurrencySettings;
   priceData: PriceDataSettings;
   display: DisplaySettings;
   notifications: NotificationSettings;
+  onchain: OnchainSettings;
   lastUpdated: string;
   version: string;
 }
@@ -324,6 +347,17 @@ export const defaultSettings: Omit<AppSettings, 'id' | 'lastUpdated'> = {
     },
     emailNotifications: false,
     pushNotifications: false,
+  },
+  onchain: {
+    // Opt-in: enabling this makes every watched address visible to whatever
+    // answers at esploraEndpoint. The default public endpoint is a convenience
+    // for a first run, not a privacy-preserving default.
+    enabled: false,
+    esploraEndpoint: 'https://mempool.space/api',
+    syncIntervalMinutes: 10,
+    gapLimit: 20,
+    requestTimeoutMs: 15000,
+    recalculatePortfolio: true,
   },
   version: '1.0.0',
 }; 

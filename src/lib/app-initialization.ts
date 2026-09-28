@@ -1,5 +1,6 @@
 import { PriceScheduler } from './price-scheduler';
 import { DCAScheduler } from './dca-scheduler';
+import { OnchainScheduler } from './onchain/onchain-scheduler';
 import { ExchangeRateService } from './exchange-rate-service';
 import { HistoricalDataService } from './historical-data-service';
 import { SettingsService } from './settings-service';
@@ -84,6 +85,15 @@ export class AppInitializationService {
       const dcaStats = await DCAScheduler.getStatistics();
       console.log(`[DCA] Scheduler started (${dcaStats.active} active)`);
 
+      // On-chain polling is opt-in and sends watched addresses to whatever
+      // endpoint the user configured, so its failure must never be fatal and it
+      // must not run at all when `onchain.enabled` is false.
+      try {
+        await OnchainScheduler.start();
+      } catch (error) {
+        console.error('[WARN] On-chain scheduler failed to start:', error);
+      }
+
       this.setupShutdownHandlers();
 
     } catch (error) {
@@ -100,6 +110,7 @@ export class AppInitializationService {
       console.log('[STOP] Shutting down...');
       PriceScheduler.stop();
       DCAScheduler.stop();
+      OnchainScheduler.stop();
       console.log('[OK] Stopped');
     };
 

@@ -1,5 +1,6 @@
 import { prisma } from './prisma';
 import { AppSettings, defaultSettings, MainCurrency } from './types';
+import { validateOnchainSettings } from './onchain/settings-validation';
 
 export class SettingsService {
   private static settings: AppSettings | null = null;
@@ -39,6 +40,13 @@ export class SettingsService {
           const settings: AppSettings = {
             id: row.id,
             ...parsedSettings,
+            // A settings blob written before on-chain watching existed has no
+            // `onchain` key. Merging with the defaults keeps `settings.onchain`
+            // defined instead of handing the scheduler an undefined object.
+            onchain: {
+              ...defaultSettings.onchain,
+              ...(parsedSettings.onchain || {}),
+            },
             lastUpdated: row.lastUpdated.toISOString(),
             version: row.version,
           };
@@ -70,6 +78,7 @@ export class SettingsService {
         priceData: settings.priceData,
         display: settings.display,
         notifications: settings.notifications,
+        onchain: settings.onchain ?? defaultSettings.onchain,
       });
 
       const savedRecord = await prisma.appSettings.create({
@@ -112,11 +121,20 @@ export class SettingsService {
         version: updates.version || currentSettings.version,
       };
 
+      // The on-chain block is checked here rather than only in the route, so no
+      // caller can persist an endpoint the scheduler would then call on a timer.
+      const onchain = validateOnchainSettings(
+        updatedSettings.onchain,
+        currentSettings.onchain ?? defaultSettings.onchain
+      );
+      updatedSettings.onchain = onchain;
+
       const settingsData = JSON.stringify({
         currency: updatedSettings.currency,
         priceData: updatedSettings.priceData,
         display: updatedSettings.display,
         notifications: updatedSettings.notifications,
+        onchain,
       });
 
       const savedRecord = await prisma.appSettings.upsert({

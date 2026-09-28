@@ -86,7 +86,7 @@ export class ExchangeSyncService {
       // 7. Recalculate portfolio if we imported anything
       if (imported > 0) {
         try {
-          await BitcoinPriceService.calculateAndStorePortfolioSummary();
+          await BitcoinPriceService.calculateAndStorePortfolioSummary(userId);
         } catch (error) {
           console.error('[SYNC] Error recalculating portfolio after sync:', error);
         }

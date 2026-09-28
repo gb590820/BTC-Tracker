@@ -67,11 +67,11 @@ export class BitcoinPriceService {
   private static readonly PRICE_CACHE_DURATION = 30000; // 30 seconds
 
   // Debouncing for portfolio calculations
-  private static portfolioCalculationTimeout: NodeJS.Timeout | null = null;
+  private static portfolioCalculationTimeout: Map<number, NodeJS.Timeout> = new Map();
   private static readonly PORTFOLIO_DEBOUNCE_MS = 2000; // 2 seconds
 
   // Rate limiting for portfolio calculations
-  private static lastPortfolioCalculation = 0;
+  private static lastPortfolioCalculation: Map<number, number> = new Map();
   private static readonly MIN_PORTFOLIO_CALCULATION_INTERVAL = 5000; // 5 seconds
 
   /**
@@ -386,7 +386,7 @@ export class BitcoinPriceService {
   /**
    * Calculate and store complete portfolio summary
    */
-  static async calculateAndStorePortfolioSummary(currentBTCPrice?: number): Promise<void> {
+  static async calculateAndStorePortfolioSummary(userId: number, currentBTCPrice?: number): Promise<void> {
     try {
       // Get current BTC price if not provided
       if (!currentBTCPrice) {
@@ -401,13 +401,13 @@ export class BitcoinPriceService {
       const secondaryCurrency = settings.currency.secondaryCurrency;
 
       // Calculate portfolio data from transactions
-      const portfolioData = await this.calculatePortfolioFromTransactions(currentBTCPrice, mainCurrency, secondaryCurrency);
+      const portfolioData = await this.calculatePortfolioFromTransactions(userId, currentBTCPrice, mainCurrency, secondaryCurrency);
       
       // Calculate 24h portfolio change
       const portfolio24hChange = await this.calculatePortfolio24hChange(portfolioData, currentBTCPrice);
       
       // Store in portfolio_summary table
-      await this.storePortfolioSummary({
+      await this.storePortfolioSummary(userId, {
         ...portfolioData,
         portfolioChange24hMain: portfolio24hChange.changeMain,
         portfolioChange24hPercentage: portfolio24hChange.changePercent,
@@ -419,7 +419,7 @@ export class BitcoinPriceService {
         lastPriceUpdate: new Date().toISOString()
       });
 
-      console.log(`Portfolio summary updated: ${portfolioData.currentPortfolioValueMain.toFixed(2)} ${mainCurrency} (${portfolio24hChange.changePercent.toFixed(2)}% 24h)`);
+      console.log(`Portfolio summary updated for user ${userId}: ${portfolioData.currentPortfolioValueMain.toFixed(2)} ${mainCurrency} (${portfolio24hChange.changePercent.toFixed(2)}% 24h)`);
       
     } catch (error) {
       console.error('Error calculating and storing portfolio summary:', error);
@@ -428,9 +428,31 @@ export class BitcoinPriceService {
   }
 
   /**
+   * Recalculate the portfolio summary of every active user.
+   *
+   * Schedulers run outside of any request context and therefore have no user
+   * to scope their queries to. PortfolioSummary rows are per-user, so the
+   * scheduler has to fan out explicitly instead of relying on a global row.
+   */
+  static async calculateAndStorePortfolioSummaryForAllUsers(currentBTCPrice?: number): Promise<void> {
+    const users = await prisma.user.findMany({
+      where: { isActive: true },
+      select: { id: true }
+    });
+
+    for (const user of users) {
+      try {
+        await this.calculateAndStorePortfolioSummary(user.id, currentBTCPrice);
+      } catch (error) {
+        console.error(`Error calculating portfolio summary for user ${user.id}:`, error);
+      }
+    }
+  }
+
+  /**
    * Calculate portfolio data from transactions table
    */
-  private static async calculatePortfolioFromTransactions(currentBTCPrice: number, mainCurrency: string, secondaryCurrency: string): Promise<Omit<PortfolioSummaryData, 'portfolioChange24hUSD' | 'portfolioChange24hPercent' | 'lastUpdated' | 'lastPriceUpdate' | 'portfolioChange24hMain' | 'portfolioChange24hPercentage' | 'portfolioChange24hSecondary'>> {
+  private static async calculatePortfolioFromTransactions(userId: number, currentBTCPrice: number, mainCurrency: string, secondaryCurrency: string): Promise<Omit<PortfolioSummaryData, 'portfolioChange24hUSD' | 'portfolioChange24hPercent' | 'lastUpdated' | 'lastPriceUpdate' | 'portfolioChange24hMain' | 'portfolioChange24hPercentage' | 'portfolioChange24hSecondary'>> {
     try {
       // Get exchange rates for currency conversion (cached)
       const { ExchangeRateService } = await import('@/lib/exchange-rate-service');
@@ -442,8 +464,11 @@ export class BitcoinPriceService {
       ]);
 
       // Get all transactions and aggregate data in parallel to reduce I/O
+      // Every query MUST be scoped to userId: BitcoinTransaction is a per-user
+      // table and PortfolioSummary rows are per-user too.
       const [aggregateData, buyTransactions, sellTransactions, transferTransactions] = await Promise.all([
         prisma.bitcoinTransaction.aggregate({
+          where: { userId },
           _count: { id: true },
           _sum: {
             btcAmount: true,
@@ -451,7 +476,7 @@ export class BitcoinPriceService {
           }
         }),
         prisma.bitcoinTransaction.findMany({
-          where: { type: 'BUY' },
+          where: { userId, type: 'BUY' },
           select: {
             btcAmount: true,
             originalPricePerBtc: true,
@@ -460,13 +485,13 @@ export class BitcoinPriceService {
           }
         }),
         prisma.bitcoinTransaction.findMany({
-          where: { type: 'SELL' },
+          where: { userId, type: 'SELL' },
           select: {
             btcAmount: true
           }
         }),
         prisma.bitcoinTransaction.findMany({
-          where: { type: 'TRANSFER' },
+          where: { userId, type: 'TRANSFER' },
           select: {
             btcAmount: true,
             fees: true,
@@ -476,44 +501,62 @@ export class BitcoinPriceService {
         })
       ]);
 
-      // Calculate BTC fees from transfer transactions and track cold/hot wallet distribution
-      // 
-      // IMPORTANT: Transfer logic explanation
-      // ========================================
-      // When transferring Bitcoin:
-      //   - btcAmount = total amount LEAVING source wallet
-      //   - fees = network fees paid (always in BTC)
-      //   - Amount arriving at destination = btcAmount - fees
+      // Calculate holdings and track cold/hot wallet distribution
       //
-      // Example: Transfer all BTC from hot to cold wallet
-      //   - Had: 0.43134872 BTC in hot wallet
-      //   - User enters: btcAmount = 0.43134872, fees = 0.00040589
-      //   - Amount received in cold: 0.43094283 BTC (0.43134872 - 0.00040589)
-      //   - Result: Hot wallet = 0 BTC, Cold wallet = 0.43094283 BTC, Total = 0.43094283 BTC
+      // IMPORTANT: transfer semantics
+      // ================================================================
+      // btcAmount conventions, applied consistently across the codebase:
+      //
+      //   TRANSFER_IN  btcAmount = NET amount received. The network fee was
+      //                paid by the sender, so `fees` must stay 0 here.
+      //   TRANSFER_OUT btcAmount = NET amount that left our control
+      //                (gross sent minus our fee). `fees` holds the on-chain
+      //                fee, and the total formula subtracts it separately.
+      //   TO_COLD_WALLET / FROM_COLD_WALLET / BETWEEN_WALLETS
+      //                btcAmount = GROSS amount leaving the source wallet.
+      //                The destination receives btcAmount - fees, so these
+      //                only affect the total by the fee itself.
+      //
+      // Resulting total: BUY - SELL + TRANSFER_IN - TRANSFER_OUT - BTC_FEES
       let totalFeesBTC = 0;
       let coldWalletBTC = 0;
-      
+      let totalBtcTransferredIn = 0;
+      let totalBtcTransferredOut = 0;
+
       for (const tx of transferTransactions) {
+        const btcFee = tx.feesCurrency.toUpperCase() === 'BTC' ? tx.fees : 0;
+
         // Fees paid in BTC reduce total holdings (burned, gone forever)
-        if (tx.feesCurrency.toUpperCase() === 'BTC') {
-          totalFeesBTC += tx.fees;
+        if (btcFee > 0) {
+          totalFeesBTC += btcFee;
         }
-        
-        // Track cold wallet movements
-        // btcAmount is total leaving source, so destination gets (btcAmount - fees)
-        if (tx.transferType === 'TO_COLD_WALLET') {
-          // Amount received in cold wallet = sent amount - fees
-          coldWalletBTC += (tx.btcAmount - tx.fees);
-        } else if (tx.transferType === 'FROM_COLD_WALLET') {
-          // Amount left cold wallet = what was sent (btcAmount includes the full send amount)
-          coldWalletBTC -= tx.btcAmount;
+
+        switch (tx.transferType) {
+          case 'TRANSFER_IN':
+            totalBtcTransferredIn += tx.btcAmount;
+            break;
+          case 'TRANSFER_OUT':
+            totalBtcTransferredOut += tx.btcAmount;
+            break;
+          case 'TO_COLD_WALLET':
+            // Amount received in cold wallet = sent amount - fees
+            coldWalletBTC += (tx.btcAmount - btcFee);
+            break;
+          case 'FROM_COLD_WALLET':
+            // Amount left cold wallet = what was sent
+            coldWalletBTC -= tx.btcAmount;
+            break;
+          default:
+            // BETWEEN_WALLETS and unlabelled legacy transfers move BTC inside
+            // the portfolio: no effect on the total beyond the fee.
+            break;
         }
       }
 
-      // Calculate total BTC (BUY - SELL - BTC_FEES)
+      // Calculate total BTC (BUY - SELL + TRANSFER_IN - TRANSFER_OUT - BTC_FEES)
       const totalBuyBTC = buyTransactions.reduce((sum, tx) => sum + tx.btcAmount, 0);
       const totalSellBTC = sellTransactions.reduce((sum, tx) => sum + tx.btcAmount, 0);
-      const totalBTC = totalBuyBTC - totalSellBTC - totalFeesBTC;
+      const totalBTC = totalBuyBTC - totalSellBTC + totalBtcTransferredIn - totalBtcTransferredOut - totalFeesBTC;
       const hotWalletBTC = totalBTC - coldWalletBTC;
       const totalSatoshis = Math.round(totalBTC * 100000000);
       const totalFeesUSD = aggregateData._sum.fees || 0;
@@ -546,8 +589,11 @@ export class BitcoinPriceService {
         weightedBuyPriceSumUSD += usdPrice * tx.btcAmount;
       }
 
-      // Volume-weighted average price: total weighted sum / total volume
-      const avgBuyPriceUSD = totalBTC > 0 ? weightedBuyPriceSumUSD / totalBTC : 0;
+      // Volume-weighted average price: total weighted sum / total volume BOUGHT.
+      // The denominator must be the volume acquired through BUY, not the current
+      // holdings: dividing by totalBTC skews the average as soon as the user sells
+      // or receives BTC outside of a purchase.
+      const avgBuyPriceUSD = totalBuyBTC > 0 ? weightedBuyPriceSumUSD / totalBuyBTC : 0;
       
       // Convert to main currency
       const totalInvestedMain = totalInvestedUSD * usdToMainRate;
@@ -695,13 +741,16 @@ export class BitcoinPriceService {
   /**
    * Store portfolio summary in database
    */
-  private static async storePortfolioSummary(data: PortfolioSummaryData): Promise<void> {
+  private static async storePortfolioSummary(userId: number, data: PortfolioSummaryData): Promise<void> {
     try {
       await prisma.portfolioSummary.upsert({
-        where: { id: 1 },
+        where: { userId },
         update: {
           totalBtc: data.totalBTC,
           totalTransactions: data.totalTransactions,
+          coldWalletBtc: data.coldWalletBTC,
+          hotWalletBtc: data.hotWalletBTC,
+          totalFeesBtc: data.totalFeesBTC,
           totalInvested: data.totalInvestedMain,
           totalFees: data.totalFeesMain,
           averageBuyPrice: data.averageBuyPriceMain,
@@ -718,9 +767,12 @@ export class BitcoinPriceService {
           lastPriceUpdate: data.lastPriceUpdate
         },
         create: {
-          id: 1,
+          userId,
           totalBtc: data.totalBTC,
           totalTransactions: data.totalTransactions,
+          coldWalletBtc: data.coldWalletBTC,
+          hotWalletBtc: data.hotWalletBTC,
+          totalFeesBtc: data.totalFeesBTC,
           totalInvested: data.totalInvestedMain,
           totalFees: data.totalFeesMain,
           averageBuyPrice: data.averageBuyPriceMain,
@@ -746,14 +798,14 @@ export class BitcoinPriceService {
   /**
    * Get portfolio summary from database
    */
-  static async getPortfolioSummary(): Promise<PortfolioSummaryData | null> {
+  static async getPortfolioSummary(userId: number): Promise<PortfolioSummaryData | null> {
     // For now, just trigger a recalculation to get current data
     // This ensures we always have the most up-to-date portfolio with all currencies
     try {
-      await this.calculateAndStorePortfolioSummary();
+      await this.calculateAndStorePortfolioSummary(userId);
       
       const record = await prisma.portfolioSummary.findUnique({
-        where: { id: 1 }
+        where: { userId }
       });
 
       if (record) {
@@ -791,7 +843,7 @@ export class BitcoinPriceService {
           // Cold/Hot Wallet Distribution
           coldWalletBTC: record.coldWalletBtc || 0,
           hotWalletBTC: record.hotWalletBtc || 0,
-          totalFeesBTC: record.totalBtc ? ((record.totalBtc || 0) - (record.coldWalletBtc || 0) - (record.hotWalletBtc || 0)) : 0,
+          totalFeesBTC: record.totalFeesBtc || 0,
           
           // Main currency values (stored directly in DB)
           mainCurrency: storedMainCurrency,
@@ -868,44 +920,49 @@ export class BitcoinPriceService {
   }
 
   /**
-   * Debounced portfolio calculation to prevent excessive I/O
+   * Debounced portfolio calculation to prevent excessive I/O.
+   * One pending timer per user so concurrent edits by different users never
+   * cancel each other's recalculation.
    */
-  static async calculateAndStorePortfolioSummaryDebounced(currentBTCPrice?: number): Promise<void> {
-    // Clear existing timeout
-    if (this.portfolioCalculationTimeout) {
-      clearTimeout(this.portfolioCalculationTimeout);
+  static async calculateAndStorePortfolioSummaryDebounced(userId: number, currentBTCPrice?: number): Promise<void> {
+    const pending = this.portfolioCalculationTimeout.get(userId);
+    if (pending) {
+      clearTimeout(pending);
     }
 
-    // Set new timeout for debounced calculation
-    this.portfolioCalculationTimeout = setTimeout(async () => {
+    const timeout = setTimeout(async () => {
+      this.portfolioCalculationTimeout.delete(userId);
       try {
-        await this.calculateAndStorePortfolioSummary(currentBTCPrice);
+        await this.calculateAndStorePortfolioSummary(userId, currentBTCPrice);
       } catch (error) {
         console.error('Error in debounced portfolio calculation:', error);
       }
     }, this.PORTFOLIO_DEBOUNCE_MS);
+
+    this.portfolioCalculationTimeout.set(userId, timeout);
   }
 
   /**
    * Rate-limited portfolio calculation to prevent excessive I/O
    */
-  static async calculateAndStorePortfolioSummaryRateLimited(currentBTCPrice?: number): Promise<void> {
+  static async calculateAndStorePortfolioSummaryRateLimited(userId: number, currentBTCPrice?: number): Promise<void> {
     const now = Date.now();
-    
+    const lastRun = this.lastPortfolioCalculation.get(userId) || 0;
+
     // Check if we're within the rate limit
-    if (now - this.lastPortfolioCalculation < this.MIN_PORTFOLIO_CALCULATION_INTERVAL) {
+    if (now - lastRun < this.MIN_PORTFOLIO_CALCULATION_INTERVAL) {
       console.log('Portfolio calculation rate limited, skipping...');
       return;
     }
 
-    this.lastPortfolioCalculation = now;
-    
+    this.lastPortfolioCalculation.set(userId, now);
+
     try {
-      await this.calculateAndStorePortfolioSummary(currentBTCPrice);
+      await this.calculateAndStorePortfolioSummary(userId, currentBTCPrice);
     } catch (error) {
       console.error('Error in rate-limited portfolio calculation:', error);
       // Reset the rate limit on error to allow retry
-      this.lastPortfolioCalculation = 0;
+      this.lastPortfolioCalculation.set(userId, 0);
       throw error;
     }
   }

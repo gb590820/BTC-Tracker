@@ -48,6 +48,22 @@ model BitcoinTransaction {
   toWalletId            Int?     @map("to_wallet_id")
   toWallet              Wallet?  @relation("TransactionToWallet", fields: [toWalletId], references: [id], onDelete: SetNull)
 
+  // On-chain provenance
+  // Set only when the row was discovered by reading the Bitcoin chain, so manual
+  // entries and CSV imports keep NULL. `txid` is the natural key used for
+  // deduplication against re-syncs and is unique per user (not globally) because
+  // two users may legitimately watch the same address.
+  source                String   @default("manual") // 'manual' | 'csv' | 'exchange' | 'onchain' | 'dca'
+  txid                  String?  @map("txid") // On-chain transaction id, lowercase hex
+  blockHeight           Int?     @map("block_height")
+  blockTime             DateTime? @map("block_time")
+  confirmations         Int      @default(0)
+  isReplaced            Boolean  @default(false) @map("is_replaced") // dropped from mempool by an RBF replacement
+  fromAddress           String?  @map("from_address")
+  toAddress             String?  @map("to_address")
+  watchedAddressId      Int?     @map("watched_address_id")
+  watchedAddress        WatchedAddress? @relation(fields: [watchedAddressId], references: [id], onDelete: SetNull)
+
   // Tracking
   createdAt             DateTime @default(now()) @map("created_at")
   updatedAt             DateTime @default(now()) @updatedAt @map("updated_at")
@@ -58,6 +74,9 @@ model BitcoinTransaction {
   @@index([transferType])
   @@index([fromWalletId])
   @@index([toWalletId])
+  @@unique([userId, txid])
+  @@index([txid])
+  @@index([watchedAddressId])
 }
 
 // Historical Bitcoin prices (daily OHLC data for long-term trends)
@@ -167,10 +186,74 @@ model Wallet {
   transactionsFrom       BitcoinTransaction[] @relation("TransactionFromWallet")
   transactionsTo         BitcoinTransaction[] @relation("TransactionToWallet")
   exchangeConnections    ExchangeConnection[]
+  watchedAddresses       WatchedAddress[]
 
   @@map("wallets")
   @@index([userId])
   @@index([type])
+}
+
+// Addresses monitored directly on the Bitcoin chain.
+//
+// This is a READ-ONLY concept: the app never holds keys and never broadcasts.
+// A row is either a single address or, when `xpub` is set, an account-level
+// extended public key whose receive (chain 0) and change (chain 1) addresses are
+// derived locally up to `gapLimit`. Watching the xpub as well as the address is
+// what makes change outputs visible: a spend sends the remainder to a freshly
+// derived address that the receive address alone would never reveal.
+model WatchedAddress {
+  id            Int      @id @default(autoincrement())
+  userId        Int      @map("user_id")
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Optional parent wallet. Derived addresses roll up into it so the existing
+  // per-wallet breakdown keeps working; a standalone address is equally valid.
+  walletId      Int?     @map("wallet_id")
+  wallet        Wallet?  @relation(fields: [walletId], references: [id], onDelete: SetNull)
+
+  label         String   @default("") // User-facing name, e.g. "Ledger cold"
+  address       String   // Single address watched on its own (always set)
+  chain         String   @default("mainnet") // 'mainnet' | 'testnet' | 'signet' | 'regtest'
+
+  // Account-level extended public key, stored encrypted. Legacy: NULL means
+  // only `address` is watched.
+  xpub          String?  @map("xpub")
+  xpubDerivationPath String? @map("xpub_derivation_path") // e.g. "m/84h/0h/0h"
+  scriptType    String   @default("p2wpkh") @map("script_type") // 'p2pkh' | 'p2wpkh-p2sh' | 'p2wpkh'
+  gapLimit      Int      @default(20) @map("gap_limit") // External + change indices to derive
+
+  // Incremental sync cursor for GET /address/:a/txs/chain/:txid. Null means
+  // "start from the tip" i.e. nothing confirmed to backfill yet.
+  lastSyncedTxid String? @map("last_synced_txid")
+  lastSyncedAddress String? @map("last_synced_address")
+  lastSyncBlock Int?    @map("last_sync_block")
+  lastSyncAt    DateTime? @map("last_sync_at")
+  lastSyncError String? @map("last_sync_error")
+  lastSyncCount Int      @default(0) @map("last_sync_count")
+
+  // Balance snapshot, in satoshis, straight from esplora's address_stats.
+  // BigInt, not Int: Prisma's Int is 32-bit and rejects anything above
+  // 2_147_483_647, which is only 21.47 BTC. SQLite's INTEGER is already 64-bit
+  // so this needs no SQL change, and the 2.1e15 sats upper bound still fits.
+  // Values are returned as JS `bigint` and must be converted before JSON.
+  balanceSats   BigInt   @default(0) @map("balance_sats")
+  fundedSats    BigInt   @default(0) @map("funded_sats")
+  spentSats     BigInt   @default(0) @map("spent_sats")
+  txCount       Int      @default(0) @map("tx_count")
+  utxoCount     Int      @default(0) @map("utxo_count")
+  balanceSyncedAt DateTime? @map("balance_synced_at")
+
+  isActive      Boolean  @default(true) @map("is_active")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  transactions  BitcoinTransaction[]
+
+  @@map("watched_addresses")
+  @@unique([userId, chain, address])
+  @@index([userId])
+  @@index([walletId])
+  @@index([isActive])
 }
 
 // Users table for authentication
@@ -204,6 +287,7 @@ model User {
   apiKeys               ApiKey[]
   wallets               Wallet[]
   exchangeConnections   ExchangeConnection[]
+  watchedAddresses      WatchedAddress[]
 
   @@map("users")
 }

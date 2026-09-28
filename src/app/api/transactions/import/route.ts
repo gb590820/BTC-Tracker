@@ -72,7 +72,7 @@ export async function POST(request: NextRequest) {
     // Recalculate portfolio after import (rate-limited to prevent I/O overload)
     if (result.imported > 0 || (result.updated && result.updated > 0)) {
       try {
-        await BitcoinPriceService.calculateAndStorePortfolioSummary();
+        await BitcoinPriceService.calculateAndStorePortfolioSummary(userId);
       } catch (error) {
         console.error('Error recalculating portfolio after import:', error);
       }

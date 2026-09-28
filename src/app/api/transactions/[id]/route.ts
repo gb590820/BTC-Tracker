@@ -178,7 +178,7 @@ export async function PUT(
 
     // Recalculate portfolio after updating transaction
     try {
-      await BitcoinPriceService.calculateAndStorePortfolioSummary();
+      await BitcoinPriceService.calculateAndStorePortfolioSummary(userId);
     } catch (portfolioError) {
       console.error('Error updating portfolio after transaction update:', portfolioError);
       // Don't fail the transaction update if portfolio update fails
@@ -253,7 +253,7 @@ export async function DELETE(
 
     // Recalculate portfolio after deleting transaction
     try {
-      await BitcoinPriceService.calculateAndStorePortfolioSummary();
+      await BitcoinPriceService.calculateAndStorePortfolioSummary(userId);
     } catch (portfolioError) {
       console.error('Error updating portfolio after transaction deletion:', portfolioError);
       // Don't fail the transaction deletion if portfolio update fails

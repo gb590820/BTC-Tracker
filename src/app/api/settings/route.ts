@@ -1,6 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { SettingsService } from '@/lib/settings-service';
 import { AppSettings } from '@/lib/types';
+import { OnchainSettingsError } from '@/lib/onchain/settings-validation';
+
+/** A rejected value, as opposed to a failure. Both handlers answer 400 for this. */
+function isValidationError(error: unknown): boolean {
+  if (error instanceof OnchainSettingsError) {
+    return true;
+  }
+  return error instanceof Error && error.message.includes('Invalid main currency');
+}
 
 /**
  * GET /api/settings
@@ -101,16 +110,17 @@ export async function PATCH(request: NextRequest): Promise<NextResponse> {
     }
 
   } catch (error) {
-    console.error('Error updating settings:', error);
-    
-    // Handle validation errors specifically
-    if (error instanceof Error && error.message.includes('Invalid main currency')) {
+    // A rejected value is the caller's problem, not a server fault: the on-chain
+    // validator (endpoint scheme, ranges) and the currency check both land here.
+    if (isValidationError(error)) {
       return NextResponse.json({
         success: false,
         error: error.message
       }, { status: 400 });
     }
-    
+
+    console.error('Error updating settings:', error);
+
     return NextResponse.json({
       success: false,
       error: 'Failed to update settings',
@@ -151,15 +161,14 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
     });
 
   } catch (error) {
-    console.error('Error replacing settings:', error);
-    
-    // Handle validation errors specifically
-    if (error instanceof Error && error.message.includes('Invalid main currency')) {
+    if (isValidationError(error)) {
       return NextResponse.json({
         success: false,
         error: error.message
       }, { status: 400 });
     }
+
+    console.error('Error replacing settings:', error);
     
     return NextResponse.json({
       success: false,

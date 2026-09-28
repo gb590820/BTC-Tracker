@@ -50,7 +50,7 @@ export class PriceScheduler {
             await BitcoinPriceService.storeCurrentPriceWithChanges(latestPrice.price_usd, 'yahoo_finance');
             
             // Recalculate and store portfolio summary with new price
-            await BitcoinPriceService.calculateAndStorePortfolioSummary(latestPrice.price_usd);
+            await BitcoinPriceService.calculateAndStorePortfolioSummaryForAllUsers(latestPrice.price_usd);
           }
         } catch (error) {
           console.error('Error in hourly intraday data fetch:', error);
@@ -128,7 +128,7 @@ export class PriceScheduler {
         console.log(`[OK] Current Bitcoin price: $${currentPrice.toFixed(2)}`);
         
         // Calculate initial portfolio summary
-        await BitcoinPriceService.calculateAndStorePortfolioSummary(currentPrice);
+        await BitcoinPriceService.calculateAndStorePortfolioSummaryForAllUsers(currentPrice);
       } catch (error) {
         console.error('Error fetching current price:', error);
       }
@@ -155,7 +155,7 @@ export class PriceScheduler {
           await BitcoinPriceService.storeCurrentPriceWithChanges(currentPrice.price_usd, 'yahoo_finance');
           
           // Calculate initial portfolio summary
-          await BitcoinPriceService.calculateAndStorePortfolioSummary(currentPrice.price_usd);
+          await BitcoinPriceService.calculateAndStorePortfolioSummaryForAllUsers(currentPrice.price_usd);
         }
       } else {
         console.log(`Latest price found: $${latestPrice}, updating recent data...`);
@@ -171,7 +171,7 @@ export class PriceScheduler {
           await BitcoinPriceService.storeCurrentPriceWithChanges(currentPrice.price_usd, 'yahoo_finance');
           
           // Recalculate and store portfolio summary with new price
-          await BitcoinPriceService.calculateAndStorePortfolioSummary(currentPrice.price_usd);
+          await BitcoinPriceService.calculateAndStorePortfolioSummaryForAllUsers(currentPrice.price_usd);
         }
       }
       
@@ -216,7 +216,7 @@ export class PriceScheduler {
         await BitcoinPriceService.storeCurrentPriceWithChanges(latestPrice.price_usd, 'yahoo_finance');
         
         // Recalculate and store portfolio summary with new price
-        await BitcoinPriceService.calculateAndStorePortfolioSummary(latestPrice.price_usd);
+        await BitcoinPriceService.calculateAndStorePortfolioSummaryForAllUsers(latestPrice.price_usd);
       }
       
       console.log('Manual Bitcoin price update completed');

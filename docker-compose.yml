@@ -1,4 +1,49 @@
 services:
+  # Optional: a self-hosted blockchain backend for on-chain address watching.
+  #
+  # Off by default because it needs ~600 GB of disk for an archival-ish node and
+  # hours of initial indexing. Without it, point the On-chain settings at
+  # https://mempool.space/api, which sends your watched addresses to that third
+  # party — fine for a test, worth avoiding for a wallet you care about.
+  #
+  # To use it: uncomment this service, then set the endpoint in
+  # Settings → On-chain to http://electrs:3000/api
+  #
+  # electrs needs bitcoind with two indexes enabled, and a cookie file it can read:
+  #   bitcoind -txindex=1 -blockfilterindex=1 -cookie=/home/bitcoin/.bitcoin/cookie
+  #
+  # bitcoind:
+  #   image: bitcoin/bitcoin:27
+  #   container_name: btc-bitcoind
+  #   volumes:
+  #     - btc_chain:/bitcoin
+  #   ports:
+  #     - "8332:8332"
+  #     - "8333:8333"
+  #   restart: unless-stopped
+  #   networks:
+  #     - btc-tracker-network
+  #
+  # electrs:
+  #   image: blockstream/electrs:latest
+  #   container_name: btc-electrs
+  #   environment:
+  #     - ELECTRS_HOST=0.0.0.0
+  #     - ELECTRS_PORT=3000
+  #     - ELECTRS_COOKIE_FILE=/bitcoin/.bitcoin/cookie
+  #     - ELECTRS_BACKEND=bitcoind
+  #     - ELECTRS_TX_GRAPH_CACHE_SIZE=64
+  #   volumes:
+  #     - electrs_db:/db
+  #     - btc_chain:/bitcoin:ro
+  #   ports:
+  #     - "3001:3000"
+  #   depends_on:
+  #     - bitcoind
+  #   restart: unless-stopped
+  #   networks:
+  #     - btc-tracker-network
+
   btc-tracker:
     image: thewilqq/btc-tracker:latest  # Use :latest, :stable, or specific version like :v0.6.0
     container_name: btc-tracker-app
@@ -35,6 +80,10 @@ services:
 volumes:
   btc_data:
     driver: local
+  # btc_chain:
+  #   driver: local
+  # electrs_db:
+  #   driver: local
 
 networks:
   btc-tracker-network:

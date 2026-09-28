@@ -171,6 +171,18 @@ export async function GET(request: NextRequest) {
       tags: (tx as any).tags || '',
       transfer_type: (tx as any).transferType || null,
       destination_address: (tx as any).destinationAddress || null,
+      // On-chain provenance. Explicitly aliased because the rest of the payload is
+      // snake_case, and a UI that has to know about both conventions for four
+      // fields is a UI that eventually picks the wrong one.
+      source: (tx as any).source || 'manual',
+      txid: (tx as any).txid || null,
+      confirmations: (tx as any).confirmations ?? null,
+      is_replaced: (tx as any).isReplaced ?? false,
+      block_height: (tx as any).blockHeight ?? null,
+      block_time: (tx as any).blockTime ? (tx as any).blockTime.toISOString() : null,
+      from_address: (tx as any).fromAddress || null,
+      to_address: (tx as any).toAddress || null,
+      watched_address_id: (tx as any).watchedAddressId ?? null,
       from_wallet: tx.fromWallet ? { id: tx.fromWallet.id, name: tx.fromWallet.name, emoji: tx.fromWallet.emoji, type: tx.fromWallet.type } : null,
       to_wallet: tx.toWallet ? { id: tx.toWallet.id, name: tx.toWallet.name, emoji: tx.toWallet.emoji, type: tx.toWallet.type } : null,
       created_at: tx.createdAt,
@@ -372,7 +384,7 @@ export async function POST(request: NextRequest) {
 
     // Recalculate portfolio after adding transaction (debounced to reduce I/O)
     try {
-      await BitcoinPriceService.calculateAndStorePortfolioSummaryDebounced();
+      await BitcoinPriceService.calculateAndStorePortfolioSummaryDebounced(userId);
     } catch (portfolioError) {
       console.error('Error updating portfolio after transaction creation:', portfolioError);
       // Don't fail the transaction creation if portfolio update fails

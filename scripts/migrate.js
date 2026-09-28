@@ -65,6 +65,7 @@ const ALL_MIGRATIONS = [
   '20260222000000_add_api_keys',
   '20260223000000_add_multiple_wallets',
   '20260225000000_add_exchange_connections',
+  '20260928000000_add_onchain_address_watching',
 ];
 
 

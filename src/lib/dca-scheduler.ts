@@ -185,7 +185,7 @@ export class DCAScheduler {
       }
 
       // 5. Recalculate portfolio summary with new transaction
-      await BitcoinPriceService.calculateAndStorePortfolioSummary(currentBTCPriceUSD);
+      await BitcoinPriceService.calculateAndStorePortfolioSummary(recurringTx.userId, currentBTCPriceUSD);
 
       const duration = Date.now() - startTime;
       console.log(`[DCA] Completed in ${duration}ms`);

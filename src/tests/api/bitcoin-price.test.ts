@@ -22,7 +22,7 @@ jest.mock('../../lib/exchange-rate-service', () => ({
 }))
 
 import { testDb, setupTestDatabase, cleanTestDatabase, seedTestDatabase } from '../test-db'
-import { createTestUser, createTestTransaction } from '../test-helpers'
+import { createTestUser, createTestTransaction, createTestUserWithToken } from '../test-helpers'
 import { NextRequest } from 'next/server'
 import { BitcoinPriceData, PortfolioSummaryData } from '../../lib/bitcoin-price-service'
 
@@ -60,16 +60,23 @@ import { GET as bitcoinPriceTodayGET } from '../../app/api/bitcoin-price/today/r
 
 describe('Bitcoin Price API', () => {
   let testUser: any
+  let authHeaders: { Authorization: string }
 
   beforeAll(async () => {
     await setupTestDatabase()
-    testUser = await createTestUser({ email: 'testuser@example.com', password: 'password123' })
   }, 30000)
 
   beforeEach(async () => {
     await cleanTestDatabase()
     await seedTestDatabase()
-    
+
+    const userWithToken = await createTestUserWithToken({
+      email: 'testuser@example.com',
+      password: 'password123',
+    })
+    testUser = userWithToken.user
+    authHeaders = userWithToken.authHeaders
+
     // Reset all mocks
     jest.clearAllMocks()
   })
@@ -90,7 +97,7 @@ describe('Bitcoin Price API', () => {
 
       mockBitcoinPriceService.getCurrentPrice.mockResolvedValue(mockPriceData)
 
-      const mockRequest = createMockRequest('GET', '/api/bitcoin-price')
+      const mockRequest = createMockRequest('GET', '/api/bitcoin-price', undefined, authHeaders)
       const response = await bitcoinPriceGET(mockRequest)
       const data = await response.json()
 
@@ -146,7 +153,7 @@ describe('Bitcoin Price API', () => {
 
       mockBitcoinPriceService.getPortfolioSummary.mockResolvedValue(mockPortfolioData)
 
-      const mockRequest = createMockRequest('GET', '/api/bitcoin-price?endpoint=portfolio')
+      const mockRequest = createMockRequest('GET', '/api/bitcoin-price?endpoint=portfolio', undefined, authHeaders)
       const response = await bitcoinPriceGET(mockRequest)
       const data = await response.json()
 
@@ -154,13 +161,13 @@ describe('Bitcoin Price API', () => {
       expect(data.success).toBe(true)
       expect(data.data).toEqual(mockPortfolioData)
       expect(data.timestamp).toBeDefined()
-      expect(mockBitcoinPriceService.getPortfolioSummary).toHaveBeenCalledTimes(1)
+      expect(mockBitcoinPriceService.getPortfolioSummary).toHaveBeenCalledWith(testUser.id)
     })
 
     it('should return fallback price on service error', async () => {
       mockBitcoinPriceService.getCurrentPrice.mockRejectedValue(new Error('Service unavailable'))
 
-      const mockRequest = createMockRequest('GET', '/api/bitcoin-price')
+      const mockRequest = createMockRequest('GET', '/api/bitcoin-price', undefined, authHeaders)
       const response = await bitcoinPriceGET(mockRequest)
       const data = await response.json()
 
@@ -176,7 +183,7 @@ describe('Bitcoin Price API', () => {
     it('should handle portfolio summary service error', async () => {
       mockBitcoinPriceService.getPortfolioSummary.mockRejectedValue(new Error('Database error'))
 
-      const mockRequest = createMockRequest('GET', '/api/bitcoin-price?endpoint=portfolio')
+      const mockRequest = createMockRequest('GET', '/api/bitcoin-price?endpoint=portfolio', undefined, authHeaders)
       const response = await bitcoinPriceGET(mockRequest)
       const data = await response.json()
 
@@ -200,7 +207,7 @@ describe('Bitcoin Price API', () => {
       mockBitcoinPriceService.clearCache.mockResolvedValue(undefined)
       mockBitcoinPriceService.calculateAndStorePortfolioSummary.mockResolvedValue(undefined)
 
-      const mockRequest = createMockRequest('POST', '/api/bitcoin-price')
+      const mockRequest = createMockRequest('POST', '/api/bitcoin-price', undefined, authHeaders)
       const response = await bitcoinPricePOST(mockRequest)
       const data = await response.json()
 
@@ -212,14 +219,14 @@ describe('Bitcoin Price API', () => {
       
       expect(mockBitcoinPriceService.clearCache).toHaveBeenCalledTimes(1)
       expect(mockBitcoinPriceService.getCurrentPrice).toHaveBeenCalledTimes(1)
-      expect(mockBitcoinPriceService.calculateAndStorePortfolioSummary).toHaveBeenCalledWith(51000)
+      expect(mockBitcoinPriceService.calculateAndStorePortfolioSummary).toHaveBeenCalledWith(testUser.id, 51000)
     })
 
     it('should handle refresh error gracefully', async () => {
       mockBitcoinPriceService.clearCache.mockImplementation(() => {})
       mockBitcoinPriceService.getCurrentPrice.mockRejectedValue(new Error('API error'))
 
-      const mockRequest = createMockRequest('POST', '/api/bitcoin-price')
+      const mockRequest = createMockRequest('POST', '/api/bitcoin-price', undefined, authHeaders)
       const response = await bitcoinPricePOST(mockRequest)
       const data = await response.json()
 
@@ -241,7 +248,7 @@ describe('Bitcoin Price API', () => {
       mockBitcoinPriceService.clearCache.mockResolvedValue(undefined)
       mockBitcoinPriceService.calculateAndStorePortfolioSummary.mockRejectedValue(new Error('Portfolio error'))
 
-      const mockRequest = createMockRequest('POST', '/api/bitcoin-price')
+      const mockRequest = createMockRequest('POST', '/api/bitcoin-price', undefined, authHeaders)
       const response = await bitcoinPricePOST(mockRequest)
       const data = await response.json()
 
@@ -253,7 +260,7 @@ describe('Bitcoin Price API', () => {
       
       expect(mockBitcoinPriceService.clearCache).toHaveBeenCalledTimes(1)
       expect(mockBitcoinPriceService.getCurrentPrice).toHaveBeenCalledTimes(1)
-      expect(mockBitcoinPriceService.calculateAndStorePortfolioSummary).toHaveBeenCalledWith(51000)
+      expect(mockBitcoinPriceService.calculateAndStorePortfolioSummary).toHaveBeenCalledWith(testUser.id, 51000)
     })
   })
 
@@ -357,7 +364,7 @@ describe('Bitcoin Price API', () => {
 
       mockBitcoinPriceService.getCurrentPrice.mockResolvedValue(mockPriceData)
 
-      const mockRequest = createMockRequest('GET', '/api/bitcoin-price')
+      const mockRequest = createMockRequest('GET', '/api/bitcoin-price', undefined, authHeaders)
       const response = await bitcoinPriceGET(mockRequest)
       const data = await response.json()
 
@@ -412,7 +419,7 @@ describe('Bitcoin Price API', () => {
 
       mockBitcoinPriceService.getPortfolioSummary.mockResolvedValue(mockPortfolioData)
 
-      const mockRequest = createMockRequest('GET', '/api/bitcoin-price?endpoint=portfolio')
+      const mockRequest = createMockRequest('GET', '/api/bitcoin-price?endpoint=portfolio', undefined, authHeaders)
       const response = await bitcoinPriceGET(mockRequest)
       const data = await response.json()
 
@@ -471,7 +478,7 @@ describe('Bitcoin Price API', () => {
 
       mockBitcoinPriceService.getCurrentPrice.mockResolvedValue(mockPriceData)
 
-      const mockRequest = createMockRequest('GET', '/api/bitcoin-price?endpoint=invalid&other=params')
+      const mockRequest = createMockRequest('GET', '/api/bitcoin-price?endpoint=invalid&other=params', undefined, authHeaders)
       const response = await bitcoinPriceGET(mockRequest)
       const data = await response.json()
 
@@ -492,7 +499,7 @@ describe('Bitcoin Price API', () => {
 
       // Make multiple concurrent requests
       const requests = Array(5).fill(null).map(() => {
-        const mockRequest = createMockRequest('GET', '/api/bitcoin-price')
+        const mockRequest = createMockRequest('GET', '/api/bitcoin-price', undefined, authHeaders)
         return bitcoinPriceGET(mockRequest)
       })
 
