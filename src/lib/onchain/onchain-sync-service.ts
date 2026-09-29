@@ -564,7 +564,10 @@ export class OnchainSyncService {
       number,
       { balance: number; funded: number; spent: number; txCount: number; utxos: number }
     >();
-    const cursors = new Map<number, { txid: string; address: string } | null>();
+    // Cursor per derived address, not per record: an account-level xpub derives
+    // several addresses, and esplora only accepts a cursor txid that belongs to
+    // the address it is being asked for. Keyed by `${recordId}:${address}`.
+    const cursors = new Map<string, { txid: string; address: string; blockHeight: number | null } | null>();
 
     const recordError = (message: string) => {
       for (const result of results) {
@@ -821,7 +824,17 @@ export class OnchainSyncService {
 
       for (const result of results) {
         const current = stats.get(result.watchedAddressId);
-        const cursor = cursors.get(result.watchedAddressId) ?? null;
+
+        // A record keeps the cursor of whichever of its derived addresses has
+        // the most recent confirmed transaction: that is the only anchor that a
+        // later sync could have persisted, and it is what the UI reports.
+        const recordPrefix = `${result.watchedAddressId}:`;
+        const bestCursor = Array.from(cursors.entries())
+          .filter(([key, value]) => key.startsWith(recordPrefix) && value !== null)
+          .map(([, value]) => value)
+          .sort((a, b) => (a.blockHeight ?? -1) - (b.blockHeight ?? -1))
+          .pop();
+
         result.balanceSats = String(current?.balance ?? 0);
         result.ok = true;
 
@@ -836,8 +849,8 @@ export class OnchainSyncService {
           lastSyncBlock: tipHeight,
           lastSyncCount: result.txsImported,
           lastSyncError: null,
-          lastSyncedTxid: cursor?.txid ?? null,
-          lastSyncedAddress: cursor?.address ?? null,
+          lastSyncedTxid: bestCursor?.txid ?? null,
+          lastSyncedAddress: bestCursor?.address ?? null,
         };
 
         // userId stays in the filter even though the id is unique on its own:
@@ -884,7 +897,7 @@ export class OnchainSyncService {
     client: EsploraClient,
     ctx: AddressContext,
     record: WatchedRecord,
-    cursors: Map<number, { txid: string; address: string } | null>
+    cursors: Map<string, { txid: string; address: string; blockHeight: number | null } | null>
   ): Promise<[
     EsploraAddressInfo | null,
     EsploraTx[],
@@ -897,17 +910,22 @@ export class OnchainSyncService {
       client.getUtxos(ctx.address),
     ]);
 
-    // The column stores a bare txid; the map holds a txid/address pair. A stored
-    // cursor with no address (written by an older version) falls back to this
-    // address, which is the only one it could have referred to.
-    const stored: { txid: string; address: string } | null = record.lastSyncedTxid
-      ? { txid: record.lastSyncedTxid, address: record.lastSyncedAddress || ctx.address }
-      : null;
-    const cursor = cursors.has(record.id) ? cursors.get(record.id) : stored;
+    const key = `${record.id}:${ctx.address}`;
+
+    // A stored cursor is only usable for the address it was recorded on: a txid
+    // that belongs to another derived address is not in this address's history,
+    // and esplora rejects it. The address column acts as the tie-breaker; a bare
+    // cursor written by an older version falls back to the only address it could
+    // have referred to, which is the one being read.
+    const stored: { txid: string; address: string; blockHeight: number | null } | null =
+      record.lastSyncedTxid && (!record.lastSyncedAddress || record.lastSyncedAddress === ctx.address)
+        ? { txid: record.lastSyncedTxid, address: ctx.address, blockHeight: null }
+        : null;
+    const cursor = cursors.get(key) ?? stored;
 
     if (!cursor) {
       const confirmed = await client.getConfirmedTxs(ctx.address, MAX_CONFIRMED_TXS_PER_ADDRESS);
-      OnchainSyncService.rememberCursor(cursors, record.id, confirmed, ctx.address);
+      OnchainSyncService.rememberCursor(cursors, key, confirmed, ctx.address);
       return [info, confirmed, mempool, utxos];
     }
 
@@ -925,13 +943,12 @@ export class OnchainSyncService {
       console.warn(
         `[ONCHAIN] Cursor read failed for ${ctx.address}, falling back to a full history read: ${message}`
       );
-      cursors.set(record.id, null);
+      cursors.set(key, null);
       confirmed = await client.getConfirmedTxs(ctx.address, MAX_CONFIRMED_TXS_PER_ADDRESS);
     }
 
-    // eslint-disable-next-line no-self-assign
-    if (!cursors.has(record.id)) {
-      OnchainSyncService.rememberCursor(cursors, record.id, confirmed, ctx.address);
+    if (!cursors.has(key)) {
+      OnchainSyncService.rememberCursor(cursors, key, confirmed, ctx.address);
     }
 
     return [info, confirmed, mempool, utxos];
@@ -942,12 +959,12 @@ export class OnchainSyncService {
    *
    * esplora lists the newest first, so the first entry is the one a later
    * `after_txid` query should start from. A record with several derived
-   * addresses keeps the cursor of whichever address moved most recently, which
-   * is the only one that can serve as a cursor for the others.
+   * addresses keeps one cursor per address; the final persistence step picks the
+   * address that moved most recently as the record's single stored anchor.
    */
   private static rememberCursor(
-    cursors: Map<number, { txid: string; address: string } | null>,
-    recordId: number,
+    cursors: Map<string, { txid: string; address: string; blockHeight: number | null } | null>,
+    key: string,
     confirmed: EsploraTx[],
     address: string
   ): void {
@@ -965,11 +982,15 @@ export class OnchainSyncService {
       return;
     }
 
-    const previous = cursors.get(recordId);
+    const previous = cursors.get(key);
     if (previous && previous.txid === newest.txid) {
       return;
     }
-    cursors.set(recordId, { txid: newest.txid, address });
+    cursors.set(key, {
+      txid: newest.txid,
+      address,
+      blockHeight: newest.status?.block_height ?? null,
+    });
   }
 
   /** Memoised valuation: a batch has at most one transaction per block date. */

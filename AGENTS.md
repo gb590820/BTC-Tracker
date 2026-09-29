@@ -1,0 +1,547 @@
+# AGENTS.md — BTC Tracker
+
+Guide pour les agents et les développeurs qui travaillent sur ce dépôt.
+
+---
+
+## 1. Qu'est-ce que c'est
+
+**BTC Tracker** est un tracker de portefeuille Bitcoin **auto-hébergé**. L'utilisateur saisit
+ses transactions (achats, ventes, transferts) et l'application calcule holdings, P&L, performance
+DCA et projections.
+
+- **Version** : 0.7.0 (`VERSION`, `package.json`)
+- **Licence** : MIT
+- **Base** : Next.js App Router, React 18, TypeScript, Prisma, SQLite
+- **Langue de l'UI** : anglais uniquement. Ne pas introduire de texte en français dans les
+  composants.
+- **Langue de la codebase** : anglais (commentaires, noms, messages de log).
+
+---
+
+## 2. Lecture on-chain : ce qui est vrai aujourd'hui
+
+**Depuis la version 0.7.0, l'application peut lire la chaîne Bitcoin — en opt-in, et
+uniquement via une API Esplora.** Cette section remplace l'affirmation précédente
+« aucune donnée on-chain », qui était vraie avant cette version.
+
+### Ce qui existe
+
+- `src/lib/esplora-client.ts` : client HTTP Esplora **read-only** (`/blocks/tip/height`,
+  `/address/:addr`, `/txs/chain`, `/txs/mempool`, `/utxo`).
+- `src/lib/onchain/address-derivation.ts` : parsing xpub/ypub/zpub/tpub/upub/vpub et
+  dérivation `m/0/k` + `m/1/k` via `@scure/bip32`. Aucune clé privée n'est acceptée ni demandée.
+- `src/lib/onchain/onchain-sync-service.ts` : import des transactions, snapshots de solde.
+- `src/lib/onchain/onchain-scheduler.ts` : polling périodique.
+- `src/lib/onchain/settings-validation.ts` : validation de l'endpoint et des bornes.
+- Modèle `WatchedAddress` (`prisma/schema.prisma`) : une ligne par adresse ou xpub suivi.
+
+### Ce qui reste vrai
+
+- **Aucune écriture on-chain, jamais.** Pas de signature, pas de broadcast, pas de PSBT.
+- **Aucun WebSocket** : Esplora n'en expose pas pour les adresses, le suivi est un polling.
+- **Aucune clé privée** n'est demandée, stockée ou acceptée. `parseXpub` rejette explicitement
+  les préfixes `xprv`/`yprv`/`zprv`/`tprv` avec un message explicite.
+- Le modèle `Wallet` **reste un conteneur étiqueté** (`name`, `type`, `emoji`, `note`).
+  L'adresses vient de `WatchedAddress`, pas de `Wallet`.
+- `destination_address` reste du texte libre non validé côté import CSV.
+
+### Les trois règles à ne pas casser
+
+1. **Confidentialité de l'endpoint.** `onchain.enabled` vaut `false` par défaut. Activé, chaque
+   adresse suivie est demandée à l'endpoint configuré. Le défaut est `https://mempool.space/api`,
+   donc **les adresses d'un déploiement qui utilise le défaut sont visibles par un tiers**.
+   C'est documenté dans l'UI et le README. Pour être réellement self-hosted, il faut son propre
+   `bitcoind -txindex=1 -blockfilterindex=1` + `electrs` (recette commentée dans
+   `docker-compose.yml`).
+2. **Le xpub est chiffré au repos** (`EncryptionService`, AES) et **jamais renvoyé par l'API** :
+   les routes ne renvoient qu'un `hasXpub: boolean`. Ne jamais ajouter le xpub à une réponse,
+   un log ou un export.
+3. **L'agrégation est par utilisateur, pas par adresse surveillée.** `syncBatch` prend *toute* la
+   liste de `WatchedAddress` actives d'un utilisateur. Un envoi entre deux wallets surveillés n'est
+   reconnu que si les deux côtés sont connus : agréger adresse par adresse importerait le montant
+   entier en `TRANSFER_OUT`, et l'index unique `[userId, txid]` figerait cette ligne erronée.
+   C'est couvert par `src/tests/onchain/onchain-sync-batch.test.ts`.
+
+### Précision ES5 qui a déjà coûté un bug
+
+`tsconfig.json` cible ES5. Deux pièges, tous deux rencontrés sur cette feature :
+
+1. Une classe qui étend `Error` y perd sa chaîne de prototypes : sans
+   `Object.setPrototypeOf(this, X.prototype)`, `instanceof X` vaut **toujours** `false`. C'est le cas
+   de `EsploraError` et de `OnchainSettingsError`, tous deux testés par `instanceof`. Sans ce
+   correctif, les trois `instanceof EsploraError` du client ne absorbaient aucun 404, donc une
+   adresse neuve que le backend ne connaît pas encore levait une erreur au lieu de renvoyer
+   « aucune donnée ». Si tu ajoutes une classe d'erreur, fais la même chose.
+2. `for (const [i, x] of arr.entries())` ne compile pas (`--downlevelIteration` absent). Utilise
+   `for (let i = 0; i < arr.length; i++)`.
+
+---
+
+## 3. Démarrage
+
+### Prérequis
+- **Node.js 18+** (voir §9 — l'app est en réalité écrite pour Node 22)
+- npm 8+
+
+### Installation
+
+```bash
+npm install
+cp .env.example .env
+# OBLIGATOIRE : générer un vrai secret
+openssl rand -base64 32      # → coller dans NEXTAUTH_SECRET
+npm run dev                  # migrations appliquées automatiquement
+```
+
+Puis ouvrir http://localhost:3000. **Le premier compte créé devient automatiquement admin**
+(`src/app/api/auth/register/route.ts:43`).
+
+### Variables d'environnement
+
+| Variable | Requis | Défaut | Rôle |
+|---|---|---|---|
+| `NEXTAUTH_SECRET` | **oui** | — | Signature des sessions et des JWT d'API |
+| `DATABASE_URL` | oui | `file:./prisma/dev.db` | Chemin SQLite (voir §9 pour le piège de résolution) |
+| `NEXTAUTH_URL` | oui | `http://localhost:3000` | URL de callback auth |
+| `NODE_ENV` | non | `development` | — |
+| `ENCRYPTION_KEY` | non | dérivé | Chiffrement des clés API exchange (AES) |
+
+### Commandes
+
+```bash
+npm run dev              # migrate.js + next dev
+npm run dev:skip-migrate # next dev seul
+npm run build            # next build (output: standalone)
+npm start                # migrate.js + next start
+npm run type-check       # tsc --noEmit
+npm run lint             # next lint (déprécié en Next 16)
+npm test                 # test-setup + jest (348 tests)
+npm test:coverage
+npm exec prisma studio   # GUI BDD
+npm run db:reset         # reset + seed
+npm run electron:dev     # app desktop Electron
+```
+
+---
+
+## 4. Architecture
+
+```
+src/
+├── app/                    # App Router
+│   ├── page.tsx            # Dashboard
+│   ├── transactions/       # Liste + filtres + import/export
+│   ├── analytics/          # Perf mensuelle + stats
+│   ├── goals/              # "Planning" : 5 onglets DCA
+│   ├── settings/           # Account / Currency / PriceData / Exchanges / Display / Admin
+│   ├── profile/            # Avatar, PIN, 2FA, API keys, wallets
+│   ├── auth/               # signin / signup
+│   ├── api/                # 58 fichiers route.ts (dont /api/onchain/*)
+│   └── instrumentation.ts  # point d'entrée des schedulers
+├── components/             # 62 composants
+│   ├── widgets/            # 9 widgets du dashboard
+│   ├── dashboard/          # DashboardGrid (react-grid-layout)
+│   └── ui/                 # shadcn/ui
+├── lib/                    # 36 modules métier
+│   ├── exchanges/          # 5 adaptateurs (Kraken, Binance, Coinbase, Bybit, Gemini)
+│   ├── *-service.ts        # logique métier
+│   └── *-scheduler.ts      # tâches de fond
+├── hooks/                  # use-display-currency, use-toast, use-dark-theme-preset
+├── tests/                  # 19 fichiers de test + setup/helpers
+├── data/currencies.json    # devises intégrées
+└── types/next-auth.d.ts
+```
+
+**Environ 213 fichiers TS/TSX.** Les tests sont dans `src/tests/`, à côté du code, pas dans un
+dossier racine `__tests__`.
+
+### Démarrage à froid
+
+`src/instrumentation.ts` → `AppInitializationService.initialize()` (`src/lib/app-initialization.ts`)
+→ vérifie la BDD, charge les settings, initialise les taux de change, lance les schedulers,
+calcule le portfolio. Les erreurs d'init sont **avalées** pour ne pas empêcher le démarrage.
+
+---
+
+## 5. Modèle de données
+
+`prisma/schema.prisma` — SQLite. 15 modèles.
+
+| Modèle | Rôle |
+|---|---|
+| `User` | compte, `isAdmin`, `isActive`, PIN, secret 2FA, codes de backup |
+| `BitcoinTransaction` | BUY / SELL / TRANSFER, fees, tags CSV, wallets from/to, `destinationAddress` (texte libre) |
+| `Wallet` | étiquette utilisateur : `name`, `type` cold/hot, `emoji`, `includeInPortfolio` |
+| `Goal` | cible BTC, date, budget mensuel, scénario de prix (5°) |
+| `RecurringTransaction` | Auto-DCA : fréquence, montant, prochaine exécution |
+| `ExchangeConnection` | clé API **chiffrée**, wallet associé, statut de sync |
+| `ApiKey` | hash + prefix + expiration, pour l'automatisation |
+| `AppSettings` | JSON blob (currency / priceData / display / notifications) |
+| `DashboardLayout` | positions des widgets (JSON) |
+| `CustomCurrency` | devises définies par l'utilisateur |
+| `PortfolioSummary` | holdings pré-calculés (cold/hot, P&L, 24h) |
+| `BitcoinCurrentPrice` | dernier prix spot connu + variation 24h |
+| `BitcoinPriceHistory` | OHLC quotidien |
+| `BitcoinPriceIntraday` | points intra-day |
+| `ExchangeRate` | cache des taux fiat |
+
+### Conventions de schéma
+
+- Noms de colonnes en `snake_case` via `@map()`, noms de champs Prisma en `camelCase`
+- Tables mappées via `@@map("nom_en_snake")`
+- Chaque modèle a un `@@index([userId])`
+- `onDelete: Cascade` depuis `User` partout
+
+### Ajouter une migration
+
+1. Créer le dossier dans `prisma/migrations/` avec le format `AAAAMMJJHHMMSS_nom/`
+2. **Ajouter le nom dans le tableau `ALL_MIGRATIONS` de `scripts/migrate.js:54`** — cette liste
+   est codée en dur et sert au mécanisme de baselining/récupération. L'oublier casse la
+   récupération automatique sur les bases legacy.
+
+---
+
+## 6. Conventions de code
+
+### Chemins
+- Alias `@/*` → `src/*` (`tsconfig.json`)
+- Chemins **relatifs uniquement** dans les commandes shell
+
+### API routes
+
+Tout est en App Router, format `NextRequest` → `NextResponse`.
+
+```ts
+import { withAuth, withAdminAuth } from '@/lib/auth-helpers';
+
+export async function GET(request: NextRequest) {
+  return withAuth(request, async (userId, user) => {
+    // userId toujours filtrer les données — isolation multi-user
+    return NextResponse.json({ success: true, data });
+  });
+}
+```
+
+- `withAuth(request, cb)` — authentifie (session ou Bearer token)
+- `withAdminAuth(request, cb)` — idem + vérification admin
+- Réponses : toujours `{ success: boolean, data?, error?, message? }`
+
+**Règle critique : toute requête Prisma sur une table par utilisateur DOIT filtrer par
+`userId`.** C'est le pilier de l'isolation multi-user.
+
+### Authentification
+
+Deux mécanismes coexistants, gérés par `src/lib/auth-helpers.ts` :
+1. **Session NextAuth** — pour le navigateur
+2. **Bearer token JWT** — pour l'API (`/api/auth/token`, durée configurable, défaut 7j)
+
+`ApiKey` (nouveau) coexiste avec les JWT : vérifier lequel est utilisé avant de modifier
+`requireApiAuth` / `verifyApiToken`.
+
+### Conventions UI
+- shadcn/ui dans `src/components/ui/`
+- Couleurs sémantiques : `text-profit` (vert), `text-loss` (rouge), `text-primary` (orange bitcoin)
+- Utiliser `cn()` de `@/lib/utils` pour conditionner des classes
+- Widgets du dashboard : drag & drop via `react-grid-layout`, positions persistées dans
+  `DashboardLayout`. Toute modification de la liste de widgets doit être répercutée dans
+  `src/lib/dashboard-constants.ts` **et** dans la liste `validWidgetTypes` de
+  `src/components/dashboard/DashboardGrid.tsx:145` (sinon le widget est silencieusement ignoré
+  au chargement).
+
+### Parsers d'import CSV
+
+`src/app/api/transactions/import/parsers/`, pattern Strategy :
+`kraken.ts`, `binance.ts`, `coinbase.ts`, `strike.ts`, `bitcoin21.ts`, `river.ts`,
+`legacy.ts`, + `standard.ts` (fallback, toujours dernier dans `index.ts`).
+
+`detectParser(headers)` choisit le meilleur selon un score de confiance ; sous 30 points → fallback
+`standard`. Voir `PARSER_DEVELOPMENT_GUIDE.md`.
+
+---
+
+## 7. Pipeline de prix
+
+```
+Yahoo Finance (BTC-USD)  ──┬─→ bitcoin_current_price    (prix spot, + variation 24h)
+                           ├─→ bitcoin_price_history   (OHLC quotidien, 365 j par défaut)
+                           └─→ bitcoin_price_intraday   (points 5 min, 7 j par défaut)
+                                        ↓
+                            ExchangeRateService  ←  exchangerate-api.com/v4/latest
+                                        ↓
+                            BitcoinPriceService.calculateAndStorePortfolioSummary()
+                                        ↓
+                                   PortfolioSummary
+```
+
+### Schedulers
+
+Tous lancés par `AppInitializationService`, pilotés par `setInterval` **en mémoire**.
+
+| Scheduler | Intervalle | Fichier |
+|---|---|---|
+| Prix intra-day | 5 min | `src/lib/price-scheduler.ts:37` |
+| Taux de change | 4 h | `src/lib/price-scheduler.ts:74` |
+| Historique | quotidien (6h00) | `src/lib/historical-data-service.ts:205` (setTimeout vers 6h00 puis `setInterval` 24 h) |
+| Auto-DCA | 1 h | `src/lib/dca-scheduler.ts:15` |
+
+---
+
+## 8. Multi-utilisateur
+
+- Premier utilisateur = admin, **le reste est ignoré** si des utilisateurs existent déjà
+- Transactions, wallets, goals, API keys, layouts : isolés par `userId`
+- L'admin gère les comptes mais **ne voit jamais les données financières** des autres
+- `User.isActive` permet de désactiver un compte
+
+---
+
+## 9. Pièges connus — lire avant de coder
+
+### 9.1 Node 18 vs 22
+`yahoo-finance2@3.11.2` **requiert Node ≥ 22** et le projet ne le déclare pas (`engines.node: ">=18"`).
+L'avertissement `Unsupported environment: Requires Node >= 22.0.0` apparaît au démarrage. Les prix
+fonctionnent généralement, mais les pannes de prix ont probablement cette cause. **Node 22
+recommandé.**
+
+### 9.1b Le lockfile élague, et ce n'est pas nouveau
+`npm install --package-lock-only` retire ~1 800 lignes d'entrées mortes du `package-lock.json`, y
+ compris sur la version d'origine du dépôt : le fichier était déjà désynchronisé de ce que npm 10
+calcule, indépendamment de toute modification. Vérifié le 2026-09-27 en restaurant le
+`package.json` et le lockfile d'origine avant de relancer la commande. Le diff est donc attendu et
+`npm ci` passe (`--dry-run` vérifié). Ne pas « corriger » le diff à la main.
+
+
+### 9.2 Le chemin de la base est trompeur
+`DATABASE_URL="file:./prisma/dev.db"` (valeur de `.env.example`) est résolu par Prisma **relativement
+à l'emplacement de `schema.prisma`**, pas au cwd. Résultat : la base est créée dans
+`prisma/prisma/dev.db`, et non `prisma/dev.db` comme l'annonce le README.
+
+Pour obtenir `prisma/dev.db`, il faut `DATABASE_URL="file:./dev.db"`.
+Scripts de sauvegarde : se souvenir du chemin réel.
+
+### 9.3 `SettingsService` est global, pas par utilisateur
+`src/lib/settings-service.ts` :
+- `loadSettings()` fait `findFirst({ orderBy: { id: 'desc' } })` **sans filtre `userId`**
+- `saveSettings()` ne renseigne pas `userId`
+- un cache statique en mémoire : `private static settings`
+- `src/app/api/settings/route.ts` ne passe jamais `userId`
+
+Conséquence : en multi-utilisateur, **tous partagent les mêmes réglages** (devise, display, données
+de prix), alors que leurs transactions sont bien isolées. Le schéma prévoit `AppSettings.userId`
+mais il n'est pas utilisé. À corriger si le multi-user doit réellement isoler les préférences.
+
+### 9.4 Tests série obligatoire
+`jest.config.js` force `maxWorkers: 1` : tous les tests partagent **une seule base SQLite**
+(`src/tests/jest.env.js`). Ne pas augmenter le parallélisme, ça provoque des violations de FK.
+
+### 9.5 `ExchangeSyncService` n'est jamais automatique
+Aucun scheduler ne l'appelle. Le sync exchange est **déclenché manuellement** via
+`/api/exchanges/[id]/sync` et `/test`. Ne pas supposer une synchronisation automatique.
+
+### 9.6 Le scheduler Auto-DCA est en mémoire
+`setInterval` hourly. Au redémarrage du process, les exécutions **ratées pendant l'arrêt ne sont pas
+rattrapées** — le scheduler ne cherche que `nextExecution <= now`.
+
+### 9.7 Notifications non câblées
+`NotificationSettings` (alertes prix, seuils de profit, email, push) est persisté et éditable mais
+**aucun service d'envoi n'existe**. Réglages sans effet.
+
+### 9.8 Champs calculés non affichés
+`DCAAnalysisService` (`src/lib/dca-analysis-service.ts`, 791 lignes) calcule `recommendations`,
+`monthlyBreakdown`, `longestGap`, `missedMonths`, `bestPurchaseDate`… L'API les renvoie tous.
+Avant d'écrire du code de calcul, **vérifier si l'UI les affiche déjà** — historiquement une partie
+était calculée puis jetée (corrigé pour `recommendations` / timing / consistency / monthly le
+2026-09-27). Même situation probable sur le widget DCA Performance (`src/components/widgets/`).
+
+### 9.9 Un `.sql` parasite dans migrations/
+`prisma/migrations/0001_initial_schema.sql` est un fichier SQL isolé, pas un dossier de migration.
+Prisma ne le reconnaît pas. À supprimer si jamais touché.
+
+---
+
+## 10. Tests
+
+```bash
+npm test                  # 353 tests, 19 suites
+npm run test:watch
+npm run test:coverage
+npm run test:ci           # coverage + --ci, pour la CI
+```
+
+- Jest + ts-jest, `testEnvironment: 'node'`
+- `jest.config.js` a un `transformIgnorePatterns` qui laisse passer les paquets ESM
+  (`@scure/*`, `@noble/*`) : sans ça, `import` de `@scure/bip32` échoue à l'import du module.
+- Les tests on-chain qui ont besoin du HTTP démarrent un vrai serveur sur `127.0.0.1:0`
+  (`src/tests/onchain/onchain-sync-*.test.ts`) : c'est ce qui permet d'affirmer que le paging,
+  les 404 et le curseur se comportent comme en production.
+- `src/tests/setup.ts` : connexion à la BDD de test + nettoyage
+- `src/tests/test-utils.ts` : helpers (création d'utilisateurs, transactions factory)
+- La couverture exclut volontairement `src/app/**/*.tsx` et `src/components/**`
+
+Avant de soumettre une modification : `npm run type-check && npm run lint && npm test`.
+
+---
+
+## 11. Déploiement
+
+### Docker
+```bash
+cp docker.env.example .env   # renseigner NEXTAUTH_SECRET
+docker-compose up -d         # → http://localhost:3000
+```
+Image `thewilqq/btc-tracker`. La BDD vit dans le volume `btc_data` monté sur `/app/data`.
+`PUID`/`PGID` sont supportés pour TrueNAS / homelab. Un healthcheck sonde `/api/health`.
+
+### Umbrel
+Publication en un clic sur l'App Store Umbrel.
+
+### Electron
+`npm run electron:build` génère l'installeur Windows (beta). `electron/main.js` attend le serveur
+local via polling HTTP avant d'afficher la fenêtre.
+
+### Sauvegarde
+Tout tient dans **un seul fichier SQLite** (`prisma/prisma/dev.db` en dev,
+`/app/data/bitcoin-tracker.db` en conteneur). Copier ce fichier = backup complet.
+
+---
+
+## 12. Règle d'or
+
+1. **Ne pas casser l'isolation `userId`.** Chaque requête sur une table par utilisateur filtre.
+2. **Ne pas introduire de lecture on-chain** sans demande explicite (§2).
+3. **Ne pas modifier `package-lock.json`** en installant — `npm install` élague les paquets morts du
+   lockfile. Restaurer le fichier si le diff n'est pas voulu.
+4. **Mettre à jour `ALL_MIGRATIONS`** dans `scripts/migrate.js` à chaque nouvelle migration.
+5. **Vérifier `type-check`, `lint` et `test`** avant de conclure.
+
+---
+
+## 13. Modifications apportées depuis le projet original
+
+État au 28/09/2026. Tout est dans le **commit local `47e769f`** (42 fichiers, +7368/−2751,
+**non poussé** ; son message ne mentionne que le correctif portfolio alors qu'il contient aussi
+toute la feature on-chain). Restent **non committés** : `tsconfig.json` et `AGENTS.md`.
+
+### 13.1 Correctif multi-utilisateur (portfolio)
+
+Avant, `BitcoinPriceService.calculateAndStorePortfolioSummary()` calculait le portfolio à partir
+des transactions de **tous** les comptes et ignorait les transferts. Corrigé dans
+`src/lib/bitcoin-price-service.ts` :
+
+- la méthode prend maintenant un `userId` et calcule les holdings/P&L **par utilisateur**, en
+  comptant `TRANSFER_IN` / `TRANSFER_OUT` ;
+- le debounce statique est devenu une `Map<userId, Timeout>` au lieu d'un timeout unique
+  (deux utilisateurs qui déclenchent un calcul en même temps ne s'écrasent plus) ;
+- tous les appelants passent leur `userId` (`/api/bitcoin-price`, `/api/transactions/[id]`,
+  `/api/transactions/import`, `dca-scheduler`, `exchange-sync-service`) ;
+- les schedulers globaux utilisent `calculateAndStorePortfolioSummaryForAllUsers()`
+  (`price-scheduler.ts`).
+
+### 13.2 Surveillance on-chain read-only (opt-in)
+
+- **Schéma** : modèle `WatchedAddress` (adresse ou xpub + wallet optional + gaps), métadonnées
+  on-chain sur `BitcoinTransaction` (`txid`, `block_time`, `vout_index`, `source`, `confirmed_at`)
+  en `BIGINT`, migration `20260928000000_add_onchain_address_watching` enregistrée dans
+  `ALL_MIGRATIONS` (`scripts/migrate.js`).
+- **Client** : `src/lib/esplora-client.ts` — HTTP read-only (tip height, `/address/:addr`,
+  mempool, `/txs/chain` avec curseur, `/utxo`), gestion 404/500, `EsploraError` (voir §2 pour le
+  piège ES5).
+- **Dérivation** : `src/lib/onchain/address-derivation.ts` — parsing `xpub`/`ypub`/`zpub`/`tpub`/
+  `upub`/`vpub`, dérivation `m/0/k` (receive) + `m/1/k` (change) via `@scure/bip32`, refus explicite
+  des clés privées (`xprv`…) et des xpub P2WSH, `MAX_GAP_LIMIT = 200`.
+- **Moteur** : `src/lib/onchain/onchain-sync-service.ts` — agrégation **par utilisateur** sur
+  toutes les `WatchedAddress` actives (fusion efficace inter-wallets), snapshots par adresse,
+  curseur incrémental (`lastSyncedTxid` + `getConfirmedTxsAfter` + fenêtre de 100 récentes, repli
+  sur lecture complète), balayage RBF, réconciliation des lignes anciennes, attribution au plus
+  petit `watchedAddressId` touché.
+- **Scheduler** : `src/lib/onchain/onchain-scheduler.ts` — polling périodique, branché et arrêté
+  proprement par `AppInitializationService`.
+- **Validation** : `src/lib/onchain/settings-validation.ts` — schéma d'URL (HTTP(S) seulement,
+  sans query/fragment), bornes (intervalle 1–1440 min, timeout 1000–120000 ms, gap 1–200),
+  `OnchainSettingsError` ; `SettingsService.updateSettings` valide le bloc `onchain`,
+  `/api/settings` répond 400 sur rejet.
+- **API** : `/api/onchain/addresses`, `/[id]`, `/[id]/sync`, `/sync`, `/status` — routes dynamiques
+  alignées Next 15 (`params: Promise`), ownership par `userId` (404 si record d'un autre), le xpub
+  n'est **jamais** renvoyé (uniquement `hasXpub`), `DELETE` détache les transactions importées
+  (`watchedAddressId = null`).
+- **UI** : `src/components/OnchainPanel.tsx` (activation, endpoint + test, statut du scheduler,
+  liste/watch, sync unitaire/global, suppression), onglet `On-chain` dans `src/app/settings/page.tsx`
+  (le profil n'a pas été touché), `src/components/TransactionOnchainMeta.tsx` (badges pending /
+  replaced / txid / confirmations) intégré dans `src/app/transactions/page.tsx`.
+- **API transactions** : champs on-chain en snake_case exposés en alias dans
+  `src/app/api/transactions/route.ts`.
+- **Dépendances** : `@scure/bip32@2.4.0`, `@noble/hashes@2.4.0` ; `jest.config.js` reçoit un
+  `transformIgnorePatterns` pour down-leveler ces paquets ESM en CJS pour Jest.
+- **Docs** : `README.md` (§ on-chain + trade-off de confidentialité de l'endpoint),
+  `docker-compose.yml` (recette `bitcoind` + `electrs` commentée), présent guide.
+
+### 13.3 Bugs corrigés sur cette feature
+
+1. **ES5 + `extends Error`** — `EsploraError` et `OnchainSettingsError` perdent leur chaîne de
+   prototypes sans `Object.setPrototypeOf` : sans ça, les `instanceof` ne matchent jamais (voir §2).
+2. **Porteuses multiples vers la même adresse** — la dédup des jambes est indexée sur
+   `vin`/`vout`, pas sur l'adresse, sinon une seule sortie était conservée et les autres tombées.
+3. **Agrégation adresse par adresse** — un transfert entre deux wallets surveillés serait importé
+   comme `TRANSFER_OUT` du montant entier et figé par l'index unique `[userId, txid]` : corrigé
+   par `syncBatch` (couvert par `src/tests/onchain/onchain-sync-batch.test.ts`).
+4. **Curseur** — `lastSyncedTxid` était stocké mais jamais lu : le service relisait tout à chaque
+   tick. Il est maintenant utilisé (voir §13.2).
+
+### 13.4 Tests
+
+19 suites / 353 tests (dont 111 on-chain). Vérifié le 29/09/2026 : `npx tsc --noEmit`,
+`npx next lint` et `npm test` passent. Comptes docs vérifiés : 58 `route.ts`, 213 TS/TSX,
+19 suites de test. Le `tsconfig.json` modifié inclut `src/tests/**` dans le type-check
+(`types: ["node","jest"]`, `ignoreDeprecations: "5.0"`) ; corollaires : la valeur `6.0` de
+`ignoreDeprecations` est invalide (seule `5.0` est acceptée), et deux tests ont dû être
+branchés compatibles ES5 (pas de BigInt literal) — voir §14 pour la série suivante.
+
+---
+
+## 14. Série suivante (todo du 29/09/2026, non commitée)
+
+Vidée le 29/09/2026 : `npx tsc --noEmit`, `npx next lint` et `npm test` (353) passent.
+À committer avec `tsconfig.json` et `AGENTS.md` (le commit `47e769f` n'est pas réécrit).
+
+1. **`OnchainPanel.syncAll`** (`src/components/OnchainPanel.tsx`) — teste désormais
+   `!response.ok || !body.success` : `/api/onchain/sync` répond 200 avec `success: false` en
+   cas d'échec partiel, le toast ne l'annonçait plus.
+2. **Toast d'ajout** (`OnchainPanel.tsx`) — le POST déclenche déjà le premier sync
+   serveur (`onchain/addresses/route.ts`), donc chaîner `syncOne(id)` ferait une double
+   synchro. Le panneau affiche maintenant le `body.message` réel renvoyé par le POST au
+   lieu du fixe « Syncing it now ».
+3. **Remplacement d'xpub** (`src/app/api/onchain/addresses/[id]/route.ts`) — `buildDerivationLabel`
+   extrait vers `address-derivation.ts` ; POST et PATCH partagent le même label. Le PATCH
+   re-dérive la première adresse receive de la nouvelle clé (`deriveAddresses(…, 1, rowChain)`),
+   met à jour `data.address` + `scriptType`, vide le curseur (`lastSyncedTxid` **et**
+   `lastSyncedAddress`), et refuse la collision sur une adresse déjà suivie (409). La logique
+   de rejet testnet/mainnet compare la clé à la `chain` immuable de la ligne (et non à une
+   chaîne recalculée à partir de la clé, ce qui neutralisait le contrôle).
+4. **Curseur par adresse** (`src/lib/onchain/onchain-sync-service.ts`) — la map `cursors`
+   est keyée `${recordId}:${address}` : un curseur stocké n'est réutilisé que pour
+   l'adresse qui l'a produit (`lastSyncedAddress` comparé au contexte), jamais sondé contre
+   une autre adresse dérivée du même xpub (404 Esplora sûr). La persistance retient le
+   curseur du plus haut `blockHeight` par record. Le stub Esplora des tests sert désormais
+   un vrai 404 pour un txid étranger à l'adresse interrogée, comme le backend réel.
+5. **Tests ajoutés** (353) : PATCH xpub (re-dérivation adresse+label, curseur vidé, rejet
+   testnet, conflit 409), non-régression du label au POST, et scénario multi-adresses dans
+   `onchain-sync-batch.test.ts` (un xpub dérive plusieurs receive/change, le curseur suit
+   `getConfirmedTxsAfter` sans re-import ni re-lecture complète).
+
+---
+
+## 15. Todo — prochaines étapes
+
+1. **Commit propre** de la série §14 (messages : `fix:`, `feat:` ou `docs:` en minuscule,
+   style du dépôt), incluant `tsconfig.json` et `AGENTS.md`. Ne pas réécrire `47e769f`.
+2. **Endroit de `lastSyncBlock`** : il reflète le tip au dernier sync réussi, mais un
+   remplacement de clé le garde tel quel alors que le curseur est vidé — décider si on le
+   réinitialise aussi dans le PATCH xpub (actuellement volontairement conservé : c'est une
+   donnée de santé, pas une ancre de cursus).
+3. **Étendre le test xpub au change** : le scénario multi-adresses couvre receive + change
+   mais aucun changement de `gapLimit` ; ajouter un cas où le gap croît et où l'adresse
+   primaire reste stable.
+4. **Classement des templates `[84h/0h/0h]zpub…`** : la détection bracket n'est que
+   documentée via le label « (bracketed export) » ; un re-match POST/PATCH est couvert par
+   tests, mais pas la validation du non-determinisme entre deux exports de la même clé.

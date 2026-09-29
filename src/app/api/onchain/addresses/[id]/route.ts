@@ -2,7 +2,14 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { withAuth } from '@/lib/auth-helpers';
 import { OnchainSyncService } from '@/lib/onchain/onchain-sync-service';
-import { parseXpub, MAX_GAP_LIMIT, ScriptType } from '@/lib/onchain/address-derivation';
+import {
+  parseXpub,
+  deriveAddresses,
+  buildDerivationLabel,
+  Chain,
+  ScriptType,
+  MAX_GAP_LIMIT,
+} from '@/lib/onchain/address-derivation';
 import { serializeWatchedAddress } from '@/lib/onchain/serializers';
 
 const VALID_SCRIPT_TYPES: ScriptType[] = ['p2pkh', 'p2wpkh-p2sh', 'p2wpkh'];
@@ -57,7 +64,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
 
     const existing = await prisma.watchedAddress.findFirst({
       where: { id, userId },
-      select: { id: true },
+      select: { id: true, chain: true },
     });
     if (!existing) {
       return NextResponse.json({ success: false, error: 'Watched address not found' }, { status: 404 });
@@ -125,6 +132,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
         data.xpub = null;
         data.xpubDerivationPath = null;
         data.lastSyncedTxid = null;
+        data.lastSyncedAddress = null;
       } else {
         let parsed;
         try {
@@ -144,10 +152,39 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
             { status: 400 }
           );
         }
+
+        // The row's chain is immutable, so a testnet key on a mainnet row can
+        // never be consistent: reject it the same way POST does.
+        const rowChain: Chain =
+          existing.chain === 'testnet' || existing.chain === 'signet' || existing.chain === 'regtest'
+            ? 'testnet'
+            : 'mainnet';
+        if (parsed.chain === 'testnet' && rowChain === 'mainnet') {
+          return NextResponse.json(
+            { success: false, error: 'That is a testnet key. Create a testnet watch instead.' },
+            { status: 400 }
+          );
+        }
+
+        // Re-derive the primary receive address from the new key, like POST does
+        // for an xpub-only creation, so the row stays self-describing and the
+        // old account stops being watched along with the old key.
+        const first = deriveAddresses(parsed.xpub, parsed.scriptType, 1, rowChain).find(
+          (d) => d.chainIndex === 0 && d.index === 0
+        );
+        if (!first) {
+          return NextResponse.json(
+            { success: false, error: 'Could not derive a first address from that xpub' },
+            { status: 400 }
+          );
+        }
+
         data.xpub = OnchainSyncService.encryptXpubForStorage(parsed.xpub);
-        data.xpubDerivationPath = parsed.purpose ? `m/${parsed.purpose}h/0h/0h` : 'account key';
+        data.xpubDerivationPath = buildDerivationLabel(parsed.purpose, parsed.wasBracketed);
         data.scriptType = parsed.scriptType;
+        data.address = first.address;
         data.lastSyncedTxid = null;
+        data.lastSyncedAddress = null;
       }
     }
 
@@ -163,6 +200,21 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
             success: false,
             error: `${conflicting.join(', ')} cannot be changed. Create a new watched address instead, so the transactions already imported stay correctly attributed.`,
           },
+          { status: 409 }
+        );
+      }
+    }
+
+    // Re-deriving the primary address may collide with an address already
+    // watched on the same chain; the DB index would throw a raw error.
+    if (data.address !== undefined) {
+      const clash = await prisma.watchedAddress.findFirst({
+        where: { userId, chain: existing.chain, address: data.address as string, NOT: { id } },
+        select: { id: true },
+      });
+      if (clash) {
+        return NextResponse.json(
+          { success: false, error: 'This address is already being watched' },
           { status: 409 }
         );
       }

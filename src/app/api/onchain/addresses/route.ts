@@ -6,6 +6,7 @@ import {
   classifyAddress,
   parseXpub,
   deriveAddresses,
+  buildDerivationLabel,
   ScriptType,
   MAX_GAP_LIMIT,
 } from '@/lib/onchain/address-derivation';
@@ -35,11 +36,6 @@ function scriptTypeForAddress(address: string): ScriptType {
     default:
       return 'p2wpkh';
   }
-}
-
-function buildDerivationLabel(purpose: number | null, wasBracketed: boolean): string {
-  const base = purpose ? `m/${purpose}h/0h/0h` : 'account key';
-  return wasBracketed ? `${base} (bracketed export)` : base;
 }
 
 // GET /api/onchain/addresses - list the addresses the authenticated user watches

@@ -136,6 +136,8 @@ describe('On-chain addresses API', () => {
       // The derived first receive address becomes the row's primary address.
       expect(body.data.address).toBe('bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu');
       expect(body.data.hasXpub).toBe(true);
+      // Label non-regression: POST and PATCH share buildDerivationLabel.
+      expect(body.data.xpubDerivationPath).toBe('m/84h/0h/0h');
 
       const serialised = JSON.stringify(body);
       expect(serialised).not.toContain(ZPUB);
@@ -233,7 +235,9 @@ describe('On-chain addresses API', () => {
 
     it('serialises a BigInt balance without throwing', async () => {
       // Above 21.47 BTC the 32-bit column used to reject the write entirely.
-      const sats = 1500n * 100_000_000n;
+      // BigInt literals (1500n) do not compile on the ES5 target; use the
+      // constructor so the test can be type-checked like the rest of the code.
+      const sats = BigInt(1500) * BigInt(100_000_000);
       await testDb.watchedAddress.create({
         data: { userId, address: 'bc1qwhale', balanceSats: sats },
       });
@@ -289,6 +293,84 @@ describe('On-chain addresses API', () => {
       );
       expect(res.status).toBe(409);
       expect((await res.json()).error).toMatch(/Create a new watched address/);
+    });
+
+    it('re-derives the primary address and the label when the xpub is replaced', async () => {
+      const row = await seed();
+
+      const res = await PATCH(
+        createMockRequest('PATCH', `/api/onchain/addresses/${row.id}`, { xpub: ZPUB }, authHeaders),
+        { params: Promise.resolve({ id: String(row.id) }) }
+      );
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      // The old primary address stops being watched: it was either the receive
+      // address of the previous key or a standalone watch that the xpub replaces.
+      expect(body.data.address).toBe('bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu');
+      // The label now matches POST instead of the old ad-hoc `m/84h/0h/0h` string.
+      expect(body.data.xpubDerivationPath).toBe('m/84h/0h/0h');
+      expect(body.data.hasXpub).toBe(true);
+
+      const serialised = JSON.stringify(body);
+      expect(serialised).not.toContain(ZPUB);
+
+      const rowNow = await testDb.watchedAddress.findUniqueOrThrow({ where: { id: row.id } });
+      expect(rowNow!.address).toBe('bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu');
+      expect(rowNow!.scriptType).toBe('p2wpkh');
+    });
+
+    it('clears the sync cursor when the xpub is replaced', async () => {
+      const row = await testDb.watchedAddress.create({
+        data: {
+          userId,
+          address: 'bc1qnevermind',
+          lastSyncedTxid: 'ab'.repeat(32),
+          lastSyncedAddress: 'bc1qnevermind',
+        },
+      });
+
+      const res = await PATCH(
+        createMockRequest('PATCH', `/api/onchain/addresses/${row.id}`, { xpub: ZPUB }, authHeaders),
+        { params: Promise.resolve({ id: String(row.id) }) }
+      );
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.data.lastSyncedTxid).toBeNull();
+      expect(body.data.lastSyncedAddress).toBeNull();
+
+      const rowNow = await testDb.watchedAddress.findUniqueOrThrow({ where: { id: row.id } });
+      expect(rowNow!.lastSyncedTxid).toBeNull();
+    });
+
+    it('rejects a testnet xpub on a mainnet row', async () => {
+      const row = await seed();
+      const res = await PATCH(
+        createMockRequest(
+          'PATCH',
+          `/api/onchain/addresses/${row.id}`,
+          { xpub: 'upub5EFU65HtV5TeiSHmZZm7FUffBGy8UKeqp7vw43jYbvZPpoVsgU93oac7Wk3u6moKegAEWtGNF8DehrnHtv21XXEMYRUocHqguyjknFHYfgY' },
+          authHeaders
+        ),
+        { params: Promise.resolve({ id: String(row.id) }) }
+      );
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/testnet/);
+    });
+
+    it('refuses to re-derive onto an address already watched by another row', async () => {
+      // seed() already watches this very address (the ZPUB's first receive) on
+      // its own record, so re-deriving onto it must conflict.
+      await seed();
+      const row = await testDb.watchedAddress.create({
+        data: { userId, address: 'bc1qghost', label: 'second' },
+      });
+
+      const res = await PATCH(
+        createMockRequest('PATCH', `/api/onchain/addresses/${row.id}`, { xpub: ZPUB }, authHeaders),
+        { params: Promise.resolve({ id: String(row.id) }) }
+      );
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/already being watched/);
     });
 
     it('rejects an invalid id', async () => {

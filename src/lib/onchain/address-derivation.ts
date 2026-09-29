@@ -238,6 +238,17 @@ export interface DerivedAddress {
 export const MAX_GAP_LIMIT = 200;
 
 /**
+ * Human label for the stored xpub column, mirroring what wallets export:
+ * `m/84h/0h/0h` for a native-segwit account key, or `account key` when the
+ * purpose could not be inferred. A bracketed export ([84h/0h/0h]zpub…) is
+ * flagged so it can be told apart from a bare one.
+ */
+export function buildDerivationLabel(purpose: number | null, wasBracketed: boolean): string {
+  const base = purpose ? `m/${purpose}h/0h/0h` : 'account key';
+  return wasBracketed ? `${base} (bracketed export)` : base;
+}
+
+/**
  * Derive the receive and change addresses of an account-level xpub.
  *
  * The key is assumed to be an *account* key (e.g. `[84h/0h/0h]zpub6...`), which

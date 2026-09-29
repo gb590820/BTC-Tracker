@@ -21,6 +21,12 @@ import { AddressInfo } from 'net';
 import { prisma } from '@/lib/prisma';
 import { OnchainSyncService } from '@/lib/onchain/onchain-sync-service';
 import { EsploraTx } from '@/lib/esplora-client';
+import { parseXpub, deriveAddresses, DerivedAddress } from '@/lib/onchain/address-derivation';
+
+// Account-level zpub (native segwit, purpose 84h). Its first receive address
+// is a fixed, known value, which anchors the assertions below.
+const ZPUB =
+  'zpub6rFR7y4Q2AijBEqTUquhVz398htDFrtymD9xYYfG1m4wAcvPhXNfE3EfH1r1ADqtfSdVCToUG868RvUUkgDKf31mGDtKsAYz2oz2AGutZYs';
 
 const SATS = 100_000_000;
 
@@ -104,8 +110,21 @@ describe('OnchainSyncService batched sync', () => {
         if (cursorFails) {
           return send(500, { error: 'cursor not supported' });
         }
-        // Nothing newer than the cursor: the "already up to date" answer.
-        return send(200, []);
+        // Faithful to Esplora: the cursor txid is only meaningful for the address
+        // it belongs to. A txid foreign to this address, or an unknown address,
+        // is answered with 404 like the real backend.
+        const cursorAddress = decodeURIComponent(cursorMatch[1]);
+        const cursorTxid = cursorMatch[2];
+        const entry = addresses[cursorAddress];
+        if (!entry) {
+          return send(404, { error: 'not found' });
+        }
+        const cursorIndex = entry.txs.findIndex((t) => t.txid === cursorTxid);
+        if (cursorIndex < 0) {
+          return send(404, { error: 'cursor not in this address history' });
+        }
+        // Newer than the cursor: the list is in newest-first order.
+        return send(200, entry.txs.slice(0, cursorIndex));
       }
 
       const txsMatch = /^\/address\/([^/]+)\/txs\/(chain|mempool)$/.exec(path);
@@ -429,6 +448,99 @@ describe('OnchainSyncService batched sync', () => {
       expect(stored.confirmations).toBe(tipHeight - 800_080 + 1);
       expect(stored.blockHeight).toBe(800_080);
       expect(stored.isReplaced).toBe(false);
+    });
+  });
+
+  describe('an xpub that derives several addresses', () => {
+    const info = parseXpub(ZPUB);
+    let r0: DerivedAddress;
+    let r1: DerivedAddress;
+    let c0: DerivedAddress;
+
+    const tx1 = () => tx({
+      txid: '91'.padEnd(64, '0'),
+      outputs: [{ address: r1.address, value: 0.4 * SATS }],
+      blockHeight: 800_030,
+    });
+    const tx2 = () => tx({
+      txid: '92'.padEnd(64, '0'),
+      outputs: [{ address: c0.address, value: 0.2 * SATS }],
+      blockHeight: 800_020,
+    });
+
+    beforeEach(() => {
+      const derived = deriveAddresses(info.xpub, 'p2wpkh', 2, 'mainnet');
+      r0 = derived.find((d) => d.chainIndex === 0 && d.index === 0)!;
+      r1 = derived.find((d) => d.chainIndex === 0 && d.index === 1)!;
+      c0 = derived.find((d) => d.chainIndex === 1 && d.index === 0)!;
+    });
+
+    it('keeps one cursor per derived address and follows it', async () => {
+      expect(r0.address).toBe('bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu');
+
+      addAddress(r1.address, { funded: 0.4 * SATS, spent: 0, txCount: 1, txs: [tx1()] });
+      addAddress(c0.address, { funded: 0.2 * SATS, spent: 0, txCount: 1, txs: [tx2()] });
+
+      const record = await prisma.watchedAddress.create({
+        data: {
+          userId,
+          walletId: walletA,
+          address: r0.address,
+          xpub: OnchainSyncService.encryptXpubForStorage(info.xpub),
+          scriptType: 'p2wpkh',
+          chain: 'mainnet',
+          gapLimit: 2,
+          label: 'hzpub',
+        },
+      });
+
+      await OnchainSyncService.syncUser(userId, endpoint);
+
+      let rows = await prisma.bitcoinTransaction.findMany({ where: { userId } });
+      expect(rows).toHaveLength(2);
+
+      const stored = await prisma.watchedAddress.findUniqueOrThrow({ where: { id: record.id } });
+      // The cursor points at the *newest confirmed* tx, on address r1.
+      expect(stored.lastSyncedTxid).toBe('91'.padEnd(64, '0'));
+      expect(stored.lastSyncedAddress).toBe(r1.address);
+      // A cold pass has no cursor to ask about.
+      expect(requests.some((p) => p.includes('/txs/chain/'))).toBe(false);
+
+      // A third transaction lands on r1, and its history now includes the
+      // cursor's txid again (the tx list is newest-first).
+      addAddress(r1.address, {
+        funded: 0.5 * SATS,
+        spent: 0,
+        txCount: 2,
+        txs: [
+          tx({
+            txid: '93'.padEnd(64, '0'),
+            outputs: [{ address: r1.address, value: 0.1 * SATS }],
+            blockHeight: 800_090,
+          }),
+          tx1(),
+        ],
+      });
+
+      requests = [];
+      tipHeight = 800_110;
+      await OnchainSyncService.syncUser(userId, endpoint);
+
+      // The stored cursor is answered by r1's own history...
+      expect(requests).toContain(`/address/${r1.address}/txs/chain/${'91'.padEnd(64, '0')}`);
+      // ...and is never probed against another derived address (c0), even though
+      // c0 shares the same record: that would 404 on the real backend.
+      expect(requests).not.toContain(`/address/${c0.address}/txs/chain/${'91'.padEnd(64, '0')}`);
+
+      rows = await prisma.bitcoinTransaction.findMany({ where: { userId } });
+      expect(rows).toHaveLength(3);
+      for (const prefix of ['91', '92', '93']) {
+        expect(rows.filter((r) => r.txid.startsWith(prefix))).toHaveLength(1);
+      }
+      const t93 = rows.find((r) => r.txid.startsWith('93'))!;
+      expect(t93.btcAmount).toBeCloseTo(0.1, 8);
+      // tipHeight - blockHeight + 1 = 800_110 - 800_090 + 1
+      expect(t93.confirmations).toBe(21);
     });
   });
 

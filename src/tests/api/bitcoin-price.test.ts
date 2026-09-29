@@ -72,7 +72,6 @@ describe('Bitcoin Price API', () => {
 
     const userWithToken = await createTestUserWithToken({
       email: 'testuser@example.com',
-      password: 'password123',
     })
     testUser = userWithToken.user
     authHeaders = userWithToken.authHeaders

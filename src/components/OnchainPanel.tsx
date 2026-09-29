@@ -259,7 +259,10 @@ export function OnchainPanel() {
       }
 
       setForm({ address: '', xpub: '', label: '', walletId: NO_WALLET, chain: form.chain });
-      toast({ title: 'Address added', description: 'Syncing it now.' });
+      // The POST already runs the first sync server-side and reports what came
+      // out of it, so the panel must reflect that instead of announcing a
+      // sync that would just run again.
+      toast({ title: 'Address added', description: body.message || 'Add successful.' });
       await loadAll();
     } catch (error) {
       setFormError('Could not add this address');
@@ -294,7 +297,7 @@ export function OnchainPanel() {
     try {
       const response = await fetch('/api/onchain/sync', { method: 'POST' });
       const body = await response.json();
-      if (!response.ok) {
+      if (!response.ok || !body.success) {
         toast({ title: body.error || 'Sync failed', variant: 'destructive' });
       } else {
         toast({
