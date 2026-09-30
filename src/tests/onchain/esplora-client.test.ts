@@ -21,9 +21,9 @@ describe('EsploraClient error handling', () => {
     server = http.createServer((req, res) => {
       const path = (req.url || '/').split('?')[0];
       paths.push(path);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
 
       if (path === '/blocks/tip/height') {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
         return res.end('800000');
       }
       if (path.startsWith('/address/boom')) {
@@ -44,6 +44,7 @@ describe('EsploraClient error handling', () => {
         return res.end(JSON.stringify({ error: 'not found' }));
       }
       if (path === '/address/known') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
         return res.end(
           JSON.stringify({
             address: 'known',
@@ -65,6 +66,7 @@ describe('EsploraClient error handling', () => {
         );
       }
       if (path === '/address/known/txs/chain' || path === '/address/known/txs/mempool') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
         return res.end('[]');
       }
       if (path === '/address/known/utxo') {

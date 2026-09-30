@@ -325,6 +325,18 @@ export default function TransactionsPage() {
       )
       .map((t) => t.id);
 
+  const eligibleSelectedForExcludeDca = () =>
+    filteredAndSortedTransactions
+      .filter(
+        (t) =>
+          selectedTransactions.has(t.id) &&
+          t.type === 'BUY' &&
+          t.source === 'onchain' &&
+          t.transfer_type === 'TRANSFER_IN' &&
+          (t.original_total_amount ?? 0) > 0
+      )
+      .map((t) => t.id);
+
   const loadSummaryStats = async () => {
     try {
       // Use portfolio-metrics API for consistent P&L calculation with sidebar
@@ -474,6 +486,31 @@ export default function TransactionsPage() {
     } catch (error) {
       console.error('Error bulk-including transactions in DCA:', error);
       alert('Failed to add transactions to DCA. Please try again.');
+    }
+  };
+
+  const handleBulkExcludeFromDCA = async () => {
+    const eligibleIds = eligibleSelectedForExcludeDca();
+    if (eligibleIds.length === 0) return;
+
+    try {
+      const response = await fetch('/api/transactions/bulk-exclude-from-dca', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: eligibleIds }),
+      });
+      const result = await response.json();
+      if (result.success) {
+        alert(result.message || 'Transactions removed from DCA');
+        setSelectedTransactions(new Set());
+        setBulkActionMode(false);
+        await loadTransactions();
+      } else {
+        alert(`Error: ${result.error || result.message}`);
+      }
+    } catch (error) {
+      console.error('Error bulk-excluding transactions from DCA:', error);
+      alert('Failed to remove transactions from DCA. Please try again.');
     }
   };
 
@@ -1002,6 +1039,10 @@ export default function TransactionsPage() {
               <Button variant="outline" size="sm" onClick={handleBulkIncludeInDCA} disabled={eligibleSelectedForDca().length === 0}>
                 <TrendingUpIcon className="size-4 mr-2" />
                 Add to DCA
+              </Button>
+              <Button variant="outline" size="sm" onClick={handleBulkExcludeFromDCA} disabled={eligibleSelectedForExcludeDca().length === 0}>
+                <TrendingUpIcon className="size-4 mr-2" />
+                Remove from DCA
               </Button>
               <Button variant="destructive" size="sm" onClick={handleBulkDelete}>
                 <TrashIcon className="size-4 mr-2" />
