@@ -119,7 +119,7 @@ npm run build            # next build (output: standalone)
 npm start                # migrate.js + next start
 npm run type-check       # tsc --noEmit
 npm run lint             # next lint (déprécié en Next 16)
-npm test                 # test-setup + jest (358 tests)
+npm test                 # test-setup + jest (372 tests)
 npm test:coverage
 npm exec prisma studio   # GUI BDD
 npm run db:reset         # reset + seed
@@ -365,7 +365,7 @@ Prisma ne le reconnaît pas. À supprimer si jamais touché.
 ## 10. Tests
 
 ```bash
-npm test                  # 358 tests, 20 suites
+npm test                  # 372 tests, 24 suites
 npm run test:watch
 npm run test:coverage
 npm run test:ci           # coverage + --ci, pour la CI
@@ -492,9 +492,9 @@ des transactions de **tous** les comptes et ignorait les transferts. Corrigé da
 
 ### 13.4 Tests
 
-22 suites / 365 tests (dont 112 on-chain). Vérifié le 29/09/2026 : `npx tsc --noEmit`,
+24 suites / 372 tests (dont 112 on-chain). Vérifié le 29/09/2026 : `npx tsc --noEmit`,
 `npx next lint` et `npm test` passent. Comptes docs vérifiés : 58 `route.ts`, 213 TS/TSX,
-22 suites de test. Le `tsconfig.json` modifié inclut `src/tests/**` dans le type-check
+24 suites de test. Le `tsconfig.json` modifié inclut `src/tests/**` dans le type-check
 (`types: ["node","jest"]`, `ignoreDeprecations: "5.0"`) ; corollaires : la valeur `6.0` de
 `ignoreDeprecations` est invalide (seule `5.0` est acceptée), et deux tests ont dû être
 branchés compatibles ES5 (pas de BigInt literal).
@@ -534,6 +534,17 @@ Depuis ce changement, « Total invested » (et `averageBuyPrice`) du portfolio e
   explication assumée : un `TRANSFER_IN` n'est pas un achat prouvé. Bouton « Include in DCA »
   dans le menu de la ligne (desktop + mobile, `src/app/transactions/page.tsx`), affiché si
   `source === 'onchain'` et `original_total_amount > 0`.
+- **Exclude from DCA (annulation)** : l'inverse symétrique — `POST /api/transactions/[id]/exclude-from-dca`
+  remet `type → 'TRANSFER'` sur une ligne **déjà promue** (`type='BUY' && source='onchain' &&
+  transferType='TRANSFER_IN' && originalTotalAmount > 0`, sinon 400, ownership 404). La base de
+  coût est conservée (la ligne reste comptée dans « Total invested ») et le resync on-chain ne la
+  re-promouvra pas. Menu « Exclude from DCA » affiché mutuellement exclusif avec « Include ».
+- **Ajout groupé au DCA (sélection)** : `POST /api/transactions/bulk-include-in-dca` prend
+  `{ ids: number[] }` (validation 400), ne traite que les lignes éligibles appartenant à
+  l'utilisateur (`isOnchainAcquisition`), `updateMany` en `BUY`, un seul recalc, réponse
+  `{ included, skipped, totalSelected }` (sémantique partielle, jamais d'échec global). Côté UI,
+  bouton « Add to DCA » dans la barre d'actions groupées (désactivé si aucune sélection éligible),
+  basé sur le mode `bulkActionMode` déjà existant.
 
 Le backfill (`BitcoinPriceService.getOrFetchPriceForDate`) : quand une date de bloc précède
 la fenêtre locale (~365 j), l'historique quotidien Yahoo survit à la demande (**une seule
@@ -541,8 +552,9 @@ fois par session**, `dailyHistoryBackfills`) puis la ligne est re-lue. `saveHist
 fait des `upsert` par date (non destructif). Si le backfill échoue, l'import retombe sur le
 prix actuel et n'est jamais bloqué ; retomber sans prix écrit quand même la ligne avec une
 base nulle (jamais perdre d'histoire réelle). Couvert par
-`src/tests/bitcoin-price-service.test.ts`, `src/tests/api/portfolio-metrics.test.ts` et
-`src/tests/api/include-in-dca.test.ts`.
+`src/tests/bitcoin-price-service.test.ts`, `src/tests/api/portfolio-metrics.test.ts`,
+`src/tests/api/include-in-dca.test.ts`, `src/tests/api/exclude-from-dca.test.ts` et
+`src/tests/api/bulk-include-in-dca.test.ts`.
 
 ---
 
@@ -587,7 +599,7 @@ Cette série finalise la §13.5 (traitée « séparément » dans la §14). Elle
 `analytics` ne sommaient que les `BUY` → « Total invested = 0 ». L'ensemble est couvert par
 `src/tests/bitcoin-price-service.test.ts`, `src/tests/api/portfolio-metrics.test.ts` et
 `src/tests/api/include-in-dca.test.ts`, et validé (`tsc`, `next lint`, `npm test` : 22 suites,
-365 tests).
+365 tests). La suite se poursuit en §17 (Exclude + ajout groupé).
 
 1. **Helper partagé** (`src/lib/bitcoin-price-service.ts`) — `isOnchainAcquisition` /
    `AcquisitionCandidate` exporté ; `calculatePortfolioFromTransactions` refactoré dessus et
@@ -614,12 +626,31 @@ Cette série finalise la §13.5 (traitée « séparément » dans la §14). Elle
 
 ---
 
+## 17. Série §16 complétée le 29/09/2026 : Exclude from DCA + ajout groupé au DCA
+
+Suite directe de la §16 : rend la promotion réversible et la banalise en groupé.
+Validé (`tsc`, `next lint`, `npm test` : 24 suites, 372 tests).
+
+1. **Exclude from DCA** — `POST /api/transactions/[id]/exclude-from-dca/route.ts` (nov.) : revert
+   `type → 'TRANSFER'` pour rattraper une promo par erreur. Garde `type='BUY' && source='onchain'
+   && transferType='TRANSFER_IN' && originalTotalAmount > 0` (400 sinon), ownership 404, base de
+   coût conservée, la réconciliation on-chain ne la re-promouvra pas. Menu « Exclude from DCA »
+   (desktop + mobile) mutuellement exclusif avec « Include » (`src/app/transactions/page.tsx`).
+2. **Bulk include** — `POST /api/transactions/bulk-include-in-dca/route.ts` (nov.) : `{ ids }`
+   filtre `isOnchainAcquisition` + ownership, `updateMany` en `BUY`, un seul recalc, réponse
+   partielle `{ included, skipped, totalSelected }` (200 même si 0 éligible). Côté UI, bouton
+   « Add to DCA » dans la barre d'actions groupées du mode sélection (désactivé si aucune
+   sélection éligible), helper `eligibleSelectedForDca()`.
+3. **Tests** — `exclude-from-dca.test.ts` (3 : revert base conservée, rejet 400, ownership 404)
+   et `bulk-include-in-dca.test.ts` (4 : 2 incluses + 1 manuelle ignorée, 0 éligible, ids
+   invalides 400, ownership ignoré).
+
+---
+
 ## 15. Todo — prochaines étapes
 
-1. **Commit de la série §16** (messages `feat:`/`fix:`/`docs:` en minuscule ; ne pas réécrire
-   `47e769f`) — inclut `bitcoin-price-service.ts`, `portfolio-metrics/route.ts`,
-   `analytics/route.ts`, `include-in-dca/route.ts`, `transactions/page.tsx`, les 3 fichiers de
-   test et `AGENTS.md`.
+1. **Commit des séries §16 (fait, `a5fdef7`) et §17** (messages `feat:`/`fix:`/`docs:` en
+   minuscule ; ne pas réécrire `47e769f`).
 2. **Endroit de `lastSyncBlock`** : il reflète le tip au dernier sync réussi, mais un
    remplacement de clé le garde tel quel alors que le curseur est vidé — décider si on le
    réinitialise aussi dans le PATCH xpub (actuellement volontairement conservé : c'est une

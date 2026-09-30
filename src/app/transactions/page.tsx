@@ -313,6 +313,18 @@ export default function TransactionsPage() {
     }
   };
 
+  // Ids of the selected on-chain receives eligible for the DCA analysis.
+  const eligibleSelectedForDca = () =>
+    filteredAndSortedTransactions
+      .filter(
+        (t) =>
+          selectedTransactions.has(t.id) &&
+          t.type === 'TRANSFER' &&
+          t.source === 'onchain' &&
+          (t.original_total_amount ?? 0) > 0
+      )
+      .map((t) => t.id);
+
   const loadSummaryStats = async () => {
     try {
       // Use portfolio-metrics API for consistent P&L calculation with sidebar
@@ -420,6 +432,48 @@ export default function TransactionsPage() {
     } catch (error) {
       console.error('Error including transaction in DCA:', error);
       alert('Failed to include transaction in DCA. Please try again.');
+    }
+  };
+
+  // Revert a promoted on-chain receive back to a TRANSFER (mistake recovery).
+  const handleExcludeFromDCA = async (transaction: BitcoinTransaction) => {
+    try {
+      const response = await fetch(`/api/transactions/${transaction.id}/exclude-from-dca`, { method: 'POST' });
+      const result = await response.json();
+      if (result.success) {
+        loadTransactions();
+      } else {
+        alert(`Error: ${result.error || result.message}`);
+      }
+    } catch (error) {
+      console.error('Error excluding transaction from DCA:', error);
+      alert('Failed to exclude transaction from DCA. Please try again.');
+    }
+  };
+
+  // Bulk "Add to DCA": only eligible on-chain receives among the selection.
+  const handleBulkIncludeInDCA = async () => {
+    const eligibleIds = eligibleSelectedForDca();
+    if (eligibleIds.length === 0) return;
+
+    try {
+      const response = await fetch('/api/transactions/bulk-include-in-dca', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: eligibleIds }),
+      });
+      const result = await response.json();
+      if (result.success) {
+        alert(result.message || 'Transactions added to DCA');
+        setSelectedTransactions(new Set());
+        setBulkActionMode(false);
+        await loadTransactions();
+      } else {
+        alert(`Error: ${result.error || result.message}`);
+      }
+    } catch (error) {
+      console.error('Error bulk-including transactions in DCA:', error);
+      alert('Failed to add transactions to DCA. Please try again.');
     }
   };
 
@@ -944,10 +998,16 @@ export default function TransactionsPage() {
                 {selectedTransactions.size} of {filteredAndSortedTransactions.length} selected
               </span>
             </div>
-            <Button variant="destructive" size="sm" onClick={handleBulkDelete}>
-              <TrashIcon className="size-4 mr-2" />
-              Delete selected
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={handleBulkIncludeInDCA} disabled={eligibleSelectedForDca().length === 0}>
+                <TrendingUpIcon className="size-4 mr-2" />
+                Add to DCA
+              </Button>
+              <Button variant="destructive" size="sm" onClick={handleBulkDelete}>
+                <TrashIcon className="size-4 mr-2" />
+                Delete selected
+              </Button>
+            </div>
           </div>
         )}
 
@@ -1200,6 +1260,12 @@ export default function TransactionsPage() {
                                   Include in DCA
                                 </DropdownMenuItem>
                               )}
+                              {transaction.type === 'BUY' && transaction.source === 'onchain' && (transaction.original_total_amount ?? 0) > 0 && (
+                                <DropdownMenuItem onClick={() => handleExcludeFromDCA(transaction)}>
+                                  <TrendingDownIcon className="size-4 mr-2" />
+                                  Exclude from DCA
+                                </DropdownMenuItem>
+                              )}
                               <DropdownMenuSeparator />
                               <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={() => handleDeleteTransaction(transaction.id)}>
                                 <TrashIcon className="size-4 mr-2" />
@@ -1284,6 +1350,12 @@ export default function TransactionsPage() {
                             <Button variant="ghost" size="sm" onClick={() => handleIncludeInDCA(transaction)}>
                               <TrendingUpIcon className="size-4 mr-1" />
                               Include in DCA
+                            </Button>
+                          )}
+                          {transaction.type === 'BUY' && transaction.source === 'onchain' && (transaction.original_total_amount ?? 0) > 0 && (
+                            <Button variant="ghost" size="sm" onClick={() => handleExcludeFromDCA(transaction)}>
+                              <TrendingDownIcon className="size-4 mr-1" />
+                              Exclude from DCA
                             </Button>
                           )}
                           <Button variant="ghost" size="sm" className="text-destructive hover:text-destructive" onClick={() => handleDeleteTransaction(transaction.id)}>
