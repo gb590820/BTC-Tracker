@@ -403,6 +403,38 @@ describe('OnchainSyncService.syncWatchedAddress (against a stub backend)', () =>
     expect(row!.lastSyncBlock).toBe(800_100);
   });
 
+  it('repairs wallet attribution when an existing watch is later attached', async () => {
+    fixture.addresses['bc1qattached'] = {
+      balance: 0,
+      funded: SATS,
+      spent: 0,
+      txCount: 1,
+      txs: [
+        tx({
+          txid: 'attached'.padEnd(64, '0'),
+          outputs: [{ address: 'bc1qattached', value: SATS }],
+        }),
+      ],
+    };
+
+    const record = await prisma.watchedAddress.create({
+      data: { userId, walletId: null, address: 'bc1qattached', label: 'test' },
+    });
+    await OnchainSyncService.syncWatchedAddress(userId, record.id, endpoint);
+
+    await prisma.watchedAddress.update({
+      where: { id: record.id },
+      data: { walletId },
+    });
+    await OnchainSyncService.syncWatchedAddress(userId, record.id, endpoint);
+
+    const stored = await prisma.bitcoinTransaction.findFirst({
+      where: { userId, txid: 'attached'.padEnd(64, '0') },
+    });
+    expect(stored!.toWalletId).toBe(walletId);
+    expect(stored!.watchedAddressId).toBe(record.id);
+  });
+
   it('does not import the same txid twice on a second sync', async () => {
     fixture.addresses['bc1qdup'] = {
       balance: 0,

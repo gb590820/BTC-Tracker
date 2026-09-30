@@ -647,6 +647,7 @@ export class OnchainSyncService {
           transferType: true,
           fromWalletId: true,
           toWalletId: true,
+          watchedAddressId: true,
         },
       });
       const existingByTxid = new Map(existing.map((row) => [row.txid as string, row]));
@@ -695,7 +696,10 @@ export class OnchainSyncService {
             known.confirmations !== confirmations ||
             known.isReplaced ||
             (blockHeight !== null && known.blockHeight !== blockHeight) ||
-            drifted;
+            drifted ||
+            known.fromWalletId !== agg.fromWalletId ||
+            known.toWalletId !== agg.toWalletId ||
+            known.watchedAddressId !== ownerId;
 
           if (needsUpdate) {
             const data: Record<string, unknown> = {
@@ -727,6 +731,10 @@ export class OnchainSyncService {
                 data.originalCurrency = valuation.currency;
               }
             }
+
+            data.fromWalletId = agg.fromWalletId;
+            data.toWalletId = agg.toWalletId;
+            data.watchedAddressId = ownerId;
 
             await prisma.bitcoinTransaction.update({ where: { id: known.id }, data });
 
