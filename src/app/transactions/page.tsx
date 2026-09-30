@@ -407,6 +407,22 @@ export default function TransactionsPage() {
     }
   };
 
+  // Turn a scanned on-chain receive into a BUY so it joins the DCA analysis.
+  const handleIncludeInDCA = async (transaction: BitcoinTransaction) => {
+    try {
+      const response = await fetch(`/api/transactions/${transaction.id}/include-in-dca`, { method: 'POST' });
+      const result = await response.json();
+      if (result.success) {
+        loadTransactions();
+      } else {
+        alert(`Error: ${result.error || result.message}`);
+      }
+    } catch (error) {
+      console.error('Error including transaction in DCA:', error);
+      alert('Failed to include transaction in DCA. Please try again.');
+    }
+  };
+
   const calculatePnL = (transaction: BitcoinTransaction) => {
     if (transaction.type === 'TRANSFER') return 0;
     if (transaction.pnl_main !== undefined) return transaction.pnl_main;
@@ -1178,6 +1194,12 @@ export default function TransactionsPage() {
                                 <PencilIcon className="size-4 mr-2" />
                                 Edit
                               </DropdownMenuItem>
+                              {transaction.type === 'TRANSFER' && transaction.source === 'onchain' && (transaction.original_total_amount ?? 0) > 0 && (
+                                <DropdownMenuItem onClick={() => handleIncludeInDCA(transaction)}>
+                                  <TrendingUpIcon className="size-4 mr-2" />
+                                  Include in DCA
+                                </DropdownMenuItem>
+                              )}
                               <DropdownMenuSeparator />
                               <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={() => handleDeleteTransaction(transaction.id)}>
                                 <TrashIcon className="size-4 mr-2" />
@@ -1258,6 +1280,12 @@ export default function TransactionsPage() {
                             <PencilIcon className="size-4 mr-1" />
                             Edit
                           </Button>
+                          {transaction.type === 'TRANSFER' && transaction.source === 'onchain' && (transaction.original_total_amount ?? 0) > 0 && (
+                            <Button variant="ghost" size="sm" onClick={() => handleIncludeInDCA(transaction)}>
+                              <TrendingUpIcon className="size-4 mr-1" />
+                              Include in DCA
+                            </Button>
+                          )}
                           <Button variant="ghost" size="sm" className="text-destructive hover:text-destructive" onClick={() => handleDeleteTransaction(transaction.id)}>
                             <TrashIcon className="size-4 mr-1" />
                             Delete

@@ -121,7 +121,18 @@ describe('BitcoinPriceService acquisitions pool', () => {
     expect(summary?.averageBuyPrice).toBeCloseTo(50000)
   })
 
-  it('backfills the daily history from Yahoo and reuses it per session', async () => {
+  it('backfills the daily history from Yahoo when the date is older than the local window', async () => {
+    // A local price window exists but does not reach back to 2020-06-01.
+    await testDb.bitcoinPriceHistory.create({
+      data: {
+        date: '2020-06-10',
+        openUsd: 10000,
+        highUsd: 10100,
+        lowUsd: 9900,
+        closeUsd: 10000,
+      },
+    })
+
     mockFetchHistoricalData.mockResolvedValue([
       {
         date: '2020-06-01',
@@ -163,5 +174,13 @@ describe('BitcoinPriceService acquisitions pool', () => {
 
     expect(mockFetchHistoricalData).toHaveBeenCalledTimes(1)
     expect(mockSaveHistoricalData).toHaveBeenCalledTimes(1)
+  })
+
+  it('skips the backfill (and the network) when no local history exists', async () => {
+    const price = await BitcoinPriceService.getOrFetchPriceForDate('2020-06-01')
+
+    expect(price).toBeNull()
+    expect(mockFetchHistoricalData).not.toHaveBeenCalled()
+    expect(mockSaveHistoricalData).not.toHaveBeenCalled()
   })
 })

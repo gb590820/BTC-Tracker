@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
-import { BitcoinPriceService } from '@/lib/bitcoin-price-service';
+import { BitcoinPriceService, isOnchainAcquisition } from '@/lib/bitcoin-price-service';
 import { ExchangeRateService } from '@/lib/exchange-rate-service';
 import { SettingsService } from '@/lib/settings-service';
 import { withAuth } from '@/lib/auth-helpers';
@@ -52,6 +52,13 @@ export async function GET(request: NextRequest) {
     );
     const transfersIn = transferTransactions.filter(tx => tx.transferType === 'TRANSFER_IN');
     const transfersOut = transferTransactions.filter(tx => tx.transferType === 'TRANSFER_OUT');
+
+    // On-chain receives carry an inferred cost basis (block-day close price) and
+    // are therefore acquisitions, just like BUY rows: they count in Total
+    // invested and in the cost basis. Manual/internal transfers stay "free"
+    // (they only move coins that already belong to the portfolio).
+    const onchainAcquisitions = transferTransactions.filter(isOnchainAcquisition);
+    const onchainInBtc = onchainAcquisitions.reduce((sum, tx) => sum + tx.btcAmount, 0);
 
     // Calculate BTC fees from transfer transactions
     // IMPORTANT: btcAmount = total LEAVING source wallet, fees = network fee
@@ -157,7 +164,7 @@ export async function GET(request: NextRequest) {
     let totalInvestedMain = 0;
     let weightedBuyPriceSum = 0;
     
-    for (const tx of buyTransactions) {
+    for (const tx of [...buyTransactions, ...onchainAcquisitions]) {
       const exchangeRate = currencyToRateMap[tx.originalCurrency] || 1.0;
       const mainCurrencyTotal = tx.originalTotalAmount * exchangeRate;
       const mainCurrencyPrice = tx.originalPricePerBtc * exchangeRate;
@@ -202,33 +209,31 @@ export async function GET(request: NextRequest) {
     }
     
     // Calculate weighted average prices
-    const avgBuyPrice = totalBtcBought > 0 ? weightedBuyPriceSum / totalBtcBought : 0;
+    const totalBtcAcquired = totalBtcBought + onchainInBtc;
+    const avgBuyPrice = totalBtcAcquired > 0 ? weightedBuyPriceSum / totalBtcAcquired : 0;
     const avgSellPrice = totalBtcSold > 0 ? weightedSellPriceSum / totalBtcSold : 0;
     
     // Calculate P&L
-    // IMPORTANT: Only BUY transactions affect cost basis, not TRANSFER_IN
-    // TRANSFER_IN/OUT change holdings but NOT P&L or cost basis
+    // BUY rows and on-chain receives (block-day close basis) affect cost basis;
+    // manual/internal TRANSFER_IN/OUT only move holdings without adding basis.
     const currentValue = currentHoldings * currentPrice;
     
-    // Cost basis only for BTC acquired via BUY (not transferred in)
-    // We need to track how much BTC came from buys vs transfers
-    const btcFromBuys = totalBtcBought - totalBtcSold; // Net BTC from buy/sell activity
-    const btcFromTransfers = totalBtcTransferredIn - totalBtcTransferredOut; // Net BTC from transfers
+    // Cost basis applies to BTC acquired through a purchase: BUY rows or scanned
+    // on-chain receives with an inferred price. Coins transferred in manually
+    // have no basis and stay "free" in P&L terms.
+    const btcFromAcquisitions = totalBtcBought + onchainInBtc - totalBtcSold;
     
-    // Cost basis applies only to BTC acquired via buys
-    // If we have more holdings than bought (due to transfers in), only bought amount has cost basis
-    const btcWithCostBasis = Math.max(0, Math.min(currentHoldings, btcFromBuys - totalFeesBTC));
+    const btcWithCostBasis = Math.max(0, Math.min(currentHoldings, btcFromAcquisitions - totalFeesBTC));
     const costBasis = btcWithCostBasis * avgBuyPrice;
     
     // Unrealized P&L = current value of BTC with cost basis - cost basis
-    // BTC from transfers has no cost basis, so it's "free" in P&L terms
     const valueOfBtcWithCostBasis = btcWithCostBasis * currentPrice;
     const unrealizedPnL = valueOfBtcWithCostBasis - costBasis;
     
     const realizedPnL = totalReceivedMain - (totalBtcSold * avgBuyPrice);
     const totalPnL = unrealizedPnL + realizedPnL;
     
-    // Calculate ROI (based on invested amount only, transfers don't count as investment)
+    // ROI (on-chain scanned acquisitions count as invested; manual transfers don't)
     const roi = totalInvestedMain > 0 ? ((currentValue + totalReceivedMain - totalInvestedMain) / totalInvestedMain) * 100 : 0;
     
     // Calculate 24h portfolio change based on BTC price change
@@ -332,11 +337,11 @@ export async function GET(request: NextRequest) {
           monthName: new Date(tx.transactionDate).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
         };
         
-        if (tx.type === 'BUY') {
+        if (tx.type === 'BUY' || isOnchainAcquisition(tx)) {
           data.buys++;
           data.totalBought += tx.btcAmount;
           data.avgBuyPrice = ((data.avgBuyPrice * (data.totalBought - tx.btcAmount)) + (convertedPrice * tx.btcAmount)) / data.totalBought;
-        } else {
+        } else if (tx.type === 'SELL' || (tx.type === 'TRANSFER' && tx.source === 'onchain' && tx.transferType === 'TRANSFER_OUT')) {
           data.sells++;
           data.totalSold += tx.btcAmount;
           data.avgSellPrice = ((data.avgSellPrice * (data.totalSold - tx.btcAmount)) + (convertedPrice * tx.btcAmount)) / data.totalSold;

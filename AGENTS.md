@@ -492,9 +492,9 @@ des transactions de **tous** les comptes et ignorait les transferts. Corrigé da
 
 ### 13.4 Tests
 
-20 suites / 358 tests (dont 112 on-chain). Vérifié le 29/09/2026 : `npx tsc --noEmit`,
+22 suites / 365 tests (dont 112 on-chain). Vérifié le 29/09/2026 : `npx tsc --noEmit`,
 `npx next lint` et `npm test` passent. Comptes docs vérifiés : 58 `route.ts`, 213 TS/TSX,
-20 suites de test. Le `tsconfig.json` modifié inclut `src/tests/**` dans le type-check
+22 suites de test. Le `tsconfig.json` modifié inclut `src/tests/**` dans le type-check
 (`types: ["node","jest"]`, `ignoreDeprecations: "5.0"`) ; corollaires : la valeur `6.0` de
 `ignoreDeprecations` est invalide (seule `5.0` est acceptée), et deux tests ont dû être
 branchés compatibles ES5 (pas de BigInt literal).
@@ -513,6 +513,27 @@ Depuis ce changement, « Total invested » (et `averageBuyPrice`) du portfolio e
 - Une ligne importée sans base de coût (`originalTotalAmount == 0`) est exclue.
 - `averageBuyPriceUSD = weightedBuyPriceSumUSD / totalAcquiredBTC` (volume acquis, pas le
   solde courant).
+- **Calculateurs alignés sur le même pool** (helper partagé `isOnchainAcquisition` dans
+  `bitcoin-price-service.ts`) : `/api/portfolio-metrics` (widget Investment + page analytics
+  via `?detailed=true`) et `/api/analytics` comptent tous deux le pool dans « Total invested »
+  et `totalBtcAcquired` comme dénominateur d'`averageBuyPrice`. C'est le point de divergence
+  qui causait un « Total invested = 0 » sur les vues analytics alors que `d543be3` avait déjà
+  corrigé le calcul central. Le breakdown mensuel detaille bucket « buys » (BUY **ou**
+  acquisition on-chain) vs « sells » (SELL **ou** `TRANSFER_OUT` on-chain), transferts internes
+  ignorés des deux côtés.
+- **Backfill *gagé*** : `getOrFetchPriceForDate` ne laisse passer la demande Yahoo que si la
+  table `bitcoin_price_history` contient **au moins un enregistrement** (une fenêtre locale
+  existe). Sur une base vide (base neuve, tortues de test), il retourne `null` **sans toucher au
+  réseau** — sans ce garde-fou, un import sur base vierge déclenchait un appel Yahoo réel et
+  faisait passer `npm test` en flake (6 tests dépendaient de la réponse réseau).
+- **Include in DCA (un clic)** : une ligne on-chain éligible se promeut en `BUY` via
+  `POST /api/transactions/[id]/include-in-dca` (withAuth + ownership, validation
+  `isOnchainAcquisition`, recalcule le portfolio). La ligne convertie garde `source='onchain'`,
+  `transferType` et sa base de coût inférée ; la réconciliation on-chain n'y touche pas (elle ne
+  force `TRANSFER` que si le montant/fees/transferType *driftent*). DCA reste **BUY-only** —
+  explication assumée : un `TRANSFER_IN` n'est pas un achat prouvé. Bouton « Include in DCA »
+  dans le menu de la ligne (desktop + mobile, `src/app/transactions/page.tsx`), affiché si
+  `source === 'onchain'` et `original_total_amount > 0`.
 
 Le backfill (`BitcoinPriceService.getOrFetchPriceForDate`) : quand une date de bloc précède
 la fenêtre locale (~365 j), l'historique quotidien Yahoo survit à la demande (**une seule
@@ -520,7 +541,8 @@ fois par session**, `dailyHistoryBackfills`) puis la ligne est re-lue. `saveHist
 fait des `upsert` par date (non destructif). Si le backfill échoue, l'import retombe sur le
 prix actuel et n'est jamais bloqué ; retomber sans prix écrit quand même la ligne avec une
 base nulle (jamais perdre d'histoire réelle). Couvert par
-`src/tests/bitcoin-price-service.test.ts`.
+`src/tests/bitcoin-price-service.test.ts`, `src/tests/api/portfolio-metrics.test.ts` et
+`src/tests/api/include-in-dca.test.ts`.
 
 ---
 
@@ -558,12 +580,46 @@ cf. §15. Le commit `47e769f` n'est pas réécrit.
 
 ---
 
+## 16. Série §13.5 complétée le 29/09/2026 : « Total invested » partout + Include in DCA
+
+Cette série finalise la §13.5 (traitée « séparément » dans la §14). Elle part de `d543be3`
+(calcul central du pool) et corrige le point de divergence : `portfolio-metrics` et
+`analytics` ne sommaient que les `BUY` → « Total invested = 0 ». L'ensemble est couvert par
+`src/tests/bitcoin-price-service.test.ts`, `src/tests/api/portfolio-metrics.test.ts` et
+`src/tests/api/include-in-dca.test.ts`, et validé (`tsc`, `next lint`, `npm test` : 22 suites,
+365 tests).
+
+1. **Helper partagé** (`src/lib/bitcoin-price-service.ts`) — `isOnchainAcquisition` /
+   `AcquisitionCandidate` exporté ; `calculatePortfolioFromTransactions` refactoré dessus et
+   toutes les routes consomment le même pool (§13.5).
+2. **`/api/portfolio-metrics`** — ajoute `onchainAcquisitions` / `onchainInBtc` dans le pool,
+   `totalBtcAcquired` comme dénominateur d'`averageBuyPrice`, et un **monthly breakdown**
+   corrigé : bucket « buys » = `BUY` ou acquisition on-chain, bucket « sells » = `SELL` ou
+   `TRANSFER_OUT` on-chain, transferts internes ignorés (avant, tout non-`BUY` était compté
+   sell). C'est l'unique source du widget Investment **et** de la page analytics
+   (`?detailed=true`).
+3. **`/api/analytics`** — aligné sur le même pool (route non consommée par l'UI, uniquement
+   référencée par `middleware.ts:59` ; garde pour la cohérence des futurs consommateurs).
+4. **Backfill gagé** — `getOrFetchPriceForDate` ne tente `ensureDailyHistory()` que si
+   `bitcoin_price_history` a au moins une ligne ; sinon `null` sans réseau. C'est ce qui a
+   corrigé les 6 tests flakes de l'utilisateur (un import sur base de test vide partait en
+   appel Yahoo réel).
+5. **Include in DCA** — nouvelle route `POST /api/transactions/[id]/include-in-dca` +
+   bouton dans le menu ligne (desktop + mobile) de `src/app/transactions/page.tsx`, critère
+   d'affichage `source === 'onchain'` avec base de coût > 0 (§13.5).
+6. **Tests** — pool service + backfill gagé + skip réseau (4), déterminisme du backfill restauré
+   dans `bitcoin-price-service.test.ts` (fenêtre locale requise pour déclencher le fetch),
+   portfolio-metrics routé réel (3 : investi, transfert manuel exclu, breakdown mensuel) et
+   include-in-dca routé réel (3 : promotion, rejet 400, ownership 404).
+
+---
+
 ## 15. Todo — prochaines étapes
 
-1. **Commit propre** de la série §13.5 (messages : `feat:`/`fix:`/`docs:` en minuscule, style
-   du dépôt), incluant `bitcoin-price-service.ts`, `onchain-sync-service.ts`,
-   `src/tests/bitcoin-price-service.test.ts` et `AGENTS.md` (le diff Node 22 en attente dans
-   `AGENTS.md` part avec). Ne pas réécrire `47e769f`.
+1. **Commit de la série §16** (messages `feat:`/`fix:`/`docs:` en minuscule ; ne pas réécrire
+   `47e769f`) — inclut `bitcoin-price-service.ts`, `portfolio-metrics/route.ts`,
+   `analytics/route.ts`, `include-in-dca/route.ts`, `transactions/page.tsx`, les 3 fichiers de
+   test et `AGENTS.md`.
 2. **Endroit de `lastSyncBlock`** : il reflète le tip au dernier sync réussi, mais un
    remplacement de clé le garde tel quel alors que le curseur est vidé — décider si on le
    réinitialise aussi dans le PATCH xpub (actuellement volontairement conservé : c'est une

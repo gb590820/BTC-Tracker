@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
-import { BitcoinPriceService } from '@/lib/bitcoin-price-service';
+import { BitcoinPriceService, isOnchainAcquisition } from '@/lib/bitcoin-price-service';
 
 export async function GET(request: NextRequest) {
   try {
@@ -66,6 +66,10 @@ export async function GET(request: NextRequest) {
     // Calculate statistics - use ALL transactions for accurate holdings
     const allBuyTransactions = allTransactions.filter((tx: any) => tx.type === 'BUY');
     const allSellTransactions = allTransactions.filter((tx: any) => tx.type === 'SELL');
+    // On-chain receives carry an inferred cost basis (block-day close) and are
+    // acquisitions just like BUY rows (see isOnchainAcquisition).
+    const onchainAcquisitions = allTransactions.filter(isOnchainAcquisition);
+    const onchainInBtc = onchainAcquisitions.reduce((sum: number, tx: any) => sum + tx.btcAmount, 0);
     
     const totalBtcBought = allBuyTransactions.reduce((sum: number, tx: any) => sum + tx.btcAmount, 0);
     const totalBtcSold = allSellTransactions.reduce((sum: number, tx: any) => sum + tx.btcAmount, 0);
@@ -89,7 +93,7 @@ export async function GET(request: NextRequest) {
     let totalInvestedMain = 0;
     let weightedBuyPriceSum = 0;
     
-    for (const tx of allBuyTransactions) {
+    for (const tx of [...allBuyTransactions, ...onchainAcquisitions]) {
       const exchangeRate = currencyToRateMap[tx.originalCurrency] || 1.0;
       const mainCurrencyTotal = tx.originalTotalAmount * exchangeRate;
       const mainCurrencyPrice = tx.originalPricePerBtc * exchangeRate;
@@ -111,7 +115,8 @@ export async function GET(request: NextRequest) {
     }
     
     // Calculate weighted average prices based on ALL transactions
-    const avgBuyPrice = totalBtcBought > 0 ? weightedBuyPriceSum / totalBtcBought : 0;
+    const totalBtcAcquired = totalBtcBought + onchainInBtc;
+    const avgBuyPrice = totalBtcAcquired > 0 ? weightedBuyPriceSum / totalBtcAcquired : 0;
     const avgSellPrice = totalBtcSold > 0 ? weightedSellPriceSum / totalBtcSold : 0;
     
     // Now calculate monthly breakdown with converted prices (for range only)
@@ -131,12 +136,12 @@ export async function GET(request: NextRequest) {
         monthName: new Date(tx.transactionDate).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
       };
 
-      if (tx.type === 'BUY') {
+      if (tx.type === 'BUY' || isOnchainAcquisition(tx)) {
         data.buys++;
         data.totalBought += tx.btcAmount;
         // Weighted average for buy price
         data.avgBuyPrice = ((data.avgBuyPrice * (data.totalBought - tx.btcAmount)) + (convertedPrice * tx.btcAmount)) / data.totalBought;
-      } else {
+      } else if (tx.type === 'SELL' || (tx.type === 'TRANSFER' && tx.source === 'onchain' && tx.transferType === 'TRANSFER_OUT')) {
         data.sells++;
         data.totalSold += tx.btcAmount;
         // Weighted average for sell price
