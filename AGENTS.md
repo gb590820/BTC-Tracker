@@ -35,6 +35,9 @@ uniquement via une API Esplora.** Cette section remplace l'affirmation précéde
 - `src/lib/onchain/onchain-scheduler.ts` : polling périodique.
 - `src/lib/onchain/settings-validation.ts` : validation de l'endpoint et des bornes.
 - Modèle `WatchedAddress` (`prisma/schema.prisma`) : une ligne par adresse ou xpub suivi.
+- **Valorisation au jour du bloc** : chaque ligne importée est valorisée au prix de clôture
+  du jour du bloc (backfill Yahoo à la demande si la date précède la fenêtre locale). Ces
+  acquisitions alimentent « Total invested » (§13.5).
 
 ### Ce qui reste vrai
 
@@ -81,7 +84,7 @@ uniquement via une API Esplora.** Cette section remplace l'affirmation précéde
 ## 3. Démarrage
 
 ### Prérequis
-- **Node.js 18+** (voir §9 — l'app est en réalité écrite pour Node 22)
+- **Node.js 22+** (requis par `yahoo-finance2` et les dépendances cryptographiques)
 - npm 8+
 
 ### Installation
@@ -116,7 +119,7 @@ npm run build            # next build (output: standalone)
 npm start                # migrate.js + next start
 npm run type-check       # tsc --noEmit
 npm run lint             # next lint (déprécié en Next 16)
-npm test                 # test-setup + jest (348 tests)
+npm test                 # test-setup + jest (358 tests)
 npm test:coverage
 npm exec prisma studio   # GUI BDD
 npm run db:reset         # reset + seed
@@ -298,11 +301,10 @@ Tous lancés par `AppInitializationService`, pilotés par `setInterval` **en mé
 
 ## 9. Pièges connus — lire avant de coder
 
-### 9.1 Node 18 vs 22
-`yahoo-finance2@3.11.2` **requiert Node ≥ 22** et le projet ne le déclare pas (`engines.node: ">=18"`).
-L'avertissement `Unsupported environment: Requires Node >= 22.0.0` apparaît au démarrage. Les prix
-fonctionnent généralement, mais les pannes de prix ont probablement cette cause. **Node 22
-recommandé.**
+### 9.1 Node 22 requis
+`yahoo-finance2@3.11.2` **requiert Node ≥ 22**. Le projet déclare maintenant
+`engines.node: ">=22.0.0"` et fournit un fichier `.nvmrc`. Utiliser
+Node 22 ou plus récent pour le développement local et la production.
 
 ### 9.1b Le lockfile élague, et ce n'est pas nouveau
 `npm install --package-lock-only` retire ~1 800 lignes d'entrées mortes du `package-lock.json`, y
@@ -363,7 +365,7 @@ Prisma ne le reconnaît pas. À supprimer si jamais touché.
 ## 10. Tests
 
 ```bash
-npm test                  # 353 tests, 19 suites
+npm test                  # 358 tests, 20 suites
 npm run test:watch
 npm run test:coverage
 npm run test:ci           # coverage + --ci, pour la CI
@@ -490,19 +492,44 @@ des transactions de **tous** les comptes et ignorait les transferts. Corrigé da
 
 ### 13.4 Tests
 
-19 suites / 353 tests (dont 111 on-chain). Vérifié le 29/09/2026 : `npx tsc --noEmit`,
+20 suites / 358 tests (dont 112 on-chain). Vérifié le 29/09/2026 : `npx tsc --noEmit`,
 `npx next lint` et `npm test` passent. Comptes docs vérifiés : 58 `route.ts`, 213 TS/TSX,
-19 suites de test. Le `tsconfig.json` modifié inclut `src/tests/**` dans le type-check
+20 suites de test. Le `tsconfig.json` modifié inclut `src/tests/**` dans le type-check
 (`types: ["node","jest"]`, `ignoreDeprecations: "5.0"`) ; corollaires : la valeur `6.0` de
 `ignoreDeprecations` est invalide (seule `5.0` est acceptée), et deux tests ont dû être
-branchés compatibles ES5 (pas de BigInt literal) — voir §14 pour la série suivante.
+branchés compatibles ES5 (pas de BigInt literal).
+
+### 13.5 « Total invested » on-chain et backfill du prix historique
+
+Depuis ce changement, « Total invested » (et `averageBuyPrice`) du portfolio est calculé sur
+**tout ce que l'utilisateur a financé**, pas seulement les `BUY` :
+
+- Le pool d'acquisition = lignes `BUY` + lignes `TRANSFER` (`source == 'onchain'`,
+  `transferType == 'TRANSFER_IN'`, `originalTotalAmount > 0`). Les imports on-chain
+  valorisent chaque ligne au prix de clôture du jour du bloc ; c'est ainsi que le tracker
+  découvre le coût de BTC possédés *avant* le scan.
+- Les transferts `manual`/internes sont exclus : ils déplacent du BTC déjà dans le
+  portfolio, les compter re-compterait l'investi.
+- Une ligne importée sans base de coût (`originalTotalAmount == 0`) est exclue.
+- `averageBuyPriceUSD = weightedBuyPriceSumUSD / totalAcquiredBTC` (volume acquis, pas le
+  solde courant).
+
+Le backfill (`BitcoinPriceService.getOrFetchPriceForDate`) : quand une date de bloc précède
+la fenêtre locale (~365 j), l'historique quotidien Yahoo survit à la demande (**une seule
+fois par session**, `dailyHistoryBackfills`) puis la ligne est re-lue. `saveHistoricalData`
+fait des `upsert` par date (non destructif). Si le backfill échoue, l'import retombe sur le
+prix actuel et n'est jamais bloqué ; retomber sans prix écrit quand même la ligne avec une
+base nulle (jamais perdre d'histoire réelle). Couvert par
+`src/tests/bitcoin-price-service.test.ts`.
 
 ---
 
-## 14. Série suivante (todo du 29/09/2026, non commitée)
+## 14. Série §14 (committée le 29/09/2026)
 
-Vidée le 29/09/2026 : `npx tsc --noEmit`, `npx next lint` et `npm test` (353) passent.
-À committer avec `tsconfig.json` et `AGENTS.md` (le commit `47e769f` n'est pas réécrit).
+La série suivante est **committée** (`1b4c17f`, « fix: keep on-chain sync cursors per address »,
+10 fichiers : curseurs par adresse, PATCH xpub, UI, tests ; inclut `tsconfig.json` et
+`AGENTS.md`). La feature §13.5 (Total invested on-chain + backfill) est traitée séparément,
+cf. §15. Le commit `47e769f` n'est pas réécrit.
 
 1. **`OnchainPanel.syncAll`** (`src/components/OnchainPanel.tsx`) — teste désormais
    `!response.ok || !body.success` : `/api/onchain/sync` répond 200 avec `success: false` en
@@ -533,8 +560,10 @@ Vidée le 29/09/2026 : `npx tsc --noEmit`, `npx next lint` et `npm test` (353) p
 
 ## 15. Todo — prochaines étapes
 
-1. **Commit propre** de la série §14 (messages : `fix:`, `feat:` ou `docs:` en minuscule,
-   style du dépôt), incluant `tsconfig.json` et `AGENTS.md`. Ne pas réécrire `47e769f`.
+1. **Commit propre** de la série §13.5 (messages : `feat:`/`fix:`/`docs:` en minuscule, style
+   du dépôt), incluant `bitcoin-price-service.ts`, `onchain-sync-service.ts`,
+   `src/tests/bitcoin-price-service.test.ts` et `AGENTS.md` (le diff Node 22 en attente dans
+   `AGENTS.md` part avec). Ne pas réécrire `47e769f`.
 2. **Endroit de `lastSyncBlock`** : il reflète le tip au dernier sync réussi, mais un
    remplacement de clé le garde tel quel alors que le curseur est vidé — décider si on le
    réinitialise aussi dans le PATCH xpub (actuellement volontairement conservé : c'est une

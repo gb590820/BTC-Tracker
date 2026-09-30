@@ -365,6 +365,54 @@ export class BitcoinPriceService {
   }
 
   /**
+   * Backfills that were already attempted, so a missing date does not trigger
+   * repeated Yahoo downloads on every sync.
+   */
+  private static dailyHistoryBackfills = new Map<string, Promise<void>>();
+
+  /**
+   * Get the price for a date, fetching the daily history from Yahoo on demand
+   * when the date is older than the locally stored window (~365 days).
+   *
+   * On-chain imports value every transaction at the block-day close, but a
+   * freshly scanned address can contain transactions older than the stored
+   * history. Without a backfill those get valued at the current price, which
+   * would distort the inferred purchase cost, so the missing range is upserted
+   * into `bitcoin_price_history` once and re-read.
+   */
+  static async getOrFetchPriceForDate(date: string): Promise<number | null> {
+    const local = await this.getPriceForDate(date);
+    if (local !== null) {
+      return local;
+    }
+
+    await this.ensureDailyHistory();
+    return this.getPriceForDate(date);
+  }
+
+  private static async ensureDailyHistory(): Promise<void> {
+    let pending = this.dailyHistoryBackfills.get('all');
+    if (pending) {
+      return pending;
+    }
+
+    pending = (async () => {
+      try {
+        const { YahooFinanceService } = await import('./yahoo-finance-service');
+        // ~15 years of daily closes, upserted per date (saveHistoricalData is
+        // a per-row upsert, so the existing 1Y window is kept and extended).
+        const history = await YahooFinanceService.fetchHistoricalData('max');
+        await YahooFinanceService.saveHistoricalData(history);
+      } catch (error) {
+        console.warn(`[PRICE] Could not backfill daily history: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    })();
+
+    this.dailyHistoryBackfills.set('all', pending);
+    return pending;
+  }
+
+  /**
    * Subscribe to price updates (for real-time components)
    */
   static onPriceUpdate(callback: (price: BitcoinPriceData) => void): () => void {
@@ -496,7 +544,11 @@ export class BitcoinPriceService {
             btcAmount: true,
             fees: true,
             feesCurrency: true,
-            transferType: true
+            transferType: true,
+            source: true,
+            originalPricePerBtc: true,
+            originalTotalAmount: true,
+            originalCurrency: true
           }
         })
       ]);
@@ -561,8 +613,27 @@ export class BitcoinPriceService {
       const totalSatoshis = Math.round(totalBTC * 100000000);
       const totalFeesUSD = aggregateData._sum.fees || 0;
 
+      // Acquisition pool: everything the user put money into.
+      //
+      // BUY rows carry the fiat price actually paid. On-chain TRANSFER_IN rows
+      // are valued at the block-day close price by the on-chain importer, so an
+      // address scan is how the tracker learns the cost of coins the user
+      // already owned. Only rows with a stored basis (originalTotalAmount > 0)
+      // qualify, and only on-chain ones: manual/internal transfers (source !=
+      // 'onchain') moved BTC that already belongs to the portfolio, so counting
+      // them here would double-charge the invested amount.
+      const onchainAcquisitions = transferTransactions.filter(
+        (tx) =>
+          tx.source === 'onchain' &&
+          tx.transferType === 'TRANSFER_IN' &&
+          tx.originalTotalAmount !== null &&
+          tx.originalTotalAmount > 0
+      );
+      const acquisitionTransactions = [...buyTransactions, ...onchainAcquisitions];
+      const totalAcquiredBTC = acquisitionTransactions.reduce((sum, tx) => sum + tx.btcAmount, 0);
+
       // Batch exchange rate lookups by currency to reduce I/O
-      const uniqueCurrencies = Array.from(new Set(buyTransactions.map(tx => tx.originalCurrency))) as string[];
+      const uniqueCurrencies = Array.from(new Set(acquisitionTransactions.map(tx => tx.originalCurrency))) as string[];
       const exchangeRatePromises = uniqueCurrencies.map(currency => 
         ExchangeRateService.getExchangeRate(currency, 'USD').catch(error => {
           console.warn(`Failed to get exchange rate for ${currency}, using 1.0:`, error);
@@ -579,21 +650,21 @@ export class BitcoinPriceService {
       let totalInvestedUSD = 0;
       let weightedBuyPriceSumUSD = 0;
 
-      for (const tx of buyTransactions) {
+      for (const tx of acquisitionTransactions) {
         const exchangeRate = currencyToRateMap[tx.originalCurrency] || 1.0;
-        const usdTotal = tx.originalTotalAmount * exchangeRate;
-        const usdPrice = tx.originalPricePerBtc * exchangeRate;
+        const usdTotal = (tx.originalTotalAmount ?? 0) * exchangeRate;
+        const usdPrice = (tx.originalPricePerBtc ?? 0) * exchangeRate;
 
         totalInvestedUSD += usdTotal;
         // Volume-weighted average: sum of (price × volume)
         weightedBuyPriceSumUSD += usdPrice * tx.btcAmount;
       }
 
-      // Volume-weighted average price: total weighted sum / total volume BOUGHT.
-      // The denominator must be the volume acquired through BUY, not the current
-      // holdings: dividing by totalBTC skews the average as soon as the user sells
-      // or receives BTC outside of a purchase.
-      const avgBuyPriceUSD = totalBuyBTC > 0 ? weightedBuyPriceSumUSD / totalBuyBTC : 0;
+      // Volume-weighted average price over everything acquired (BUY + on-chain
+      // received). The denominator must be the acquired volume, not the current
+      // holdings: dividing by totalBTC skews the average as soon as the user
+      // sells or moves BTC outside of a purchase.
+      const avgBuyPriceUSD = totalAcquiredBTC > 0 ? weightedBuyPriceSumUSD / totalAcquiredBTC : 0;
       
       // Convert to main currency
       const totalInvestedMain = totalInvestedUSD * usdToMainRate;

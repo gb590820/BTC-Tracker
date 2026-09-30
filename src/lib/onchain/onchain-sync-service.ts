@@ -421,11 +421,12 @@ export class OnchainSyncService {
   /**
    * Value a transaction at the price of the day it was mined.
    *
-   * Historical closes come from `bitcoin_price_history`, which the project fills
-   * from Yahoo Finance. An unconfirmed transaction has no block date yet, so it
-   * falls back to the live price. If neither is available the row is still
-   * written, with a zero cost basis, rather than dropped: a missing price must
-   * never make real on-chain history disappear.
+   * Historical closes come from `bitcoin_price_history` (Yahoo Finance); when
+   * the block date predates the stored ~365-day window, the daily history is
+   * backfilled on demand first. An unconfirmed transaction has no block date
+   * yet, so it falls back to the live price. If neither is available the row is
+   * still written, with a zero cost basis, rather than dropped: a missing price
+   * must never make real on-chain history disappear.
    */
   private static async valueTransaction(
     btcAmount: number,
@@ -436,7 +437,10 @@ export class OnchainSyncService {
 
     if (blockTime) {
       try {
-        priceUsd = await BitcoinPriceService.getPriceForDate(OnchainSyncService.toDateKey(blockTime));
+        // Block-day close price. When the day is older than the stored price
+        // window, the daily history is backfilled from Yahoo on demand so old
+        // transactions are not silently valued at the current price.
+        priceUsd = await BitcoinPriceService.getOrFetchPriceForDate(OnchainSyncService.toDateKey(blockTime));
       } catch {
         priceUsd = null;
       }
