@@ -64,6 +64,20 @@ only show up once you spend).
 Unconfirmed transactions are counted immediately and marked as pending. If a transaction is
 replaced, it is flagged as such.
 
+Each watched address can be attached to one of your wallets, so incoming and outgoing on-chain
+transactions contribute to the corresponding hot or cold wallet balance. The balance is refreshed
+when you run a manual sync or when the on-chain scheduler polls the configured endpoint.
+
+On-chain receives are imported as transfers by default, not as purchases: the chain proves that BTC
+arrived, but it does not prove what price you paid for it. When a block date is available, BTC Tracker
+stores that day's closing price as an inferred valuation. This contributes to **Total invested**, but
+does not automatically enter DCA analysis. Use **Include in DCA** (individually or in bulk) when that
+receive represents an acquisition you want counted as a `BUY`; use **Remove from DCA** to reverse it.
+These actions do not create duplicate transactions or change the amount received.
+
+The watch list is aggregated per user. Transfers between two wallets watched by the same user are
+recognised as internal movement instead of counting the full amount as a new deposit or withdrawal.
+
 **Where your addresses go.** This is the one part that is not automatic: the app has to ask
 somewhere what it knows about your addresses, and that somewhere is a URL you configure.
 
@@ -210,7 +224,7 @@ you choose.
 
 ## Requirements
 
-- **Docker** (recommended) or Node.js 18+
+- **Docker** (recommended) or Node.js 22+
 - ~100MB disk space for the app
 - SQLite database (included, single file)
 
